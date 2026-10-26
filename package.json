@@ -1,0 +1,292 @@
+{
+  "name": "bindb",
+  "displayName": "BindB — Database IDE",
+  "description": "Schema-aware SQL editing and a fast result grid for PostgreSQL, MySQL, SQLite and H2.",
+  "version": "0.1.0",
+  "publisher": "AzuraLight",
+  "author": {
+    "name": "AzuraLight"
+  },
+  "license": "MIT",
+  "icon": "media/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AzuraLight/bindb.git"
+  },
+  "homepage": "https://github.com/AzuraLight/bindb#readme",
+  "bugs": {
+    "url": "https://github.com/AzuraLight/bindb/issues"
+  },
+  "galleryBanner": {
+    "color": "#1e1b4b",
+    "theme": "dark"
+  },
+  "preview": true,
+  "pricing": "Free",
+  "keywords": [
+    "database",
+    "sql",
+    "postgresql",
+    "mysql",
+    "sqlite",
+    "h2",
+    "query",
+    "database client"
+  ],
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Data Science",
+    "Other"
+  ],
+  "activationEvents": [
+    "onLanguage:sql"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "BindB",
+      "properties": {
+        "bindb.connections": {
+          "type": "array",
+          "default": [],
+          "description": "Database connections. Passwords are stored in the OS keychain, not here.",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "name",
+              "driver"
+            ],
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "driver": {
+                "type": "string",
+                "enum": [
+                  "postgres",
+                  "mysql",
+                  "sqlite",
+                  "h2"
+                ]
+              },
+              "host": {
+                "type": "string"
+              },
+              "port": {
+                "type": "number"
+              },
+              "database": {
+                "type": "string"
+              },
+              "user": {
+                "type": "string"
+              },
+              "file": {
+                "type": "string",
+                "description": "SQLite database file, or H2 .mv.db file (file mode)."
+              },
+              "readOnly": {
+                "type": "boolean"
+              }
+            }
+          }
+        },
+        "bindb.h2.jarPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to h2-*.jar. Used to open H2 database files (requires java on PATH)."
+        },
+        "bindb.grid.pageSize": {
+          "type": "number",
+          "default": 500,
+          "minimum": 50,
+          "description": "Rows fetched per page in the result grid."
+        }
+      }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "bindb",
+          "title": "BindB",
+          "icon": "media/bindb.svg"
+        }
+      ]
+    },
+    "views": {
+      "bindb": [
+        {
+          "id": "bindb.explorer",
+          "name": "Database Explorer"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "bindb.explorer",
+        "contents": "No connections yet.\n[Add Connection](command:bindb.addConnection)"
+      }
+    ],
+    "commands": [
+      {
+        "command": "bindb.addConnection",
+        "title": "Add Connection",
+        "category": "BindB",
+        "icon": "$(add)"
+      },
+      {
+        "command": "bindb.removeConnection",
+        "title": "Remove Connection",
+        "category": "BindB",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "bindb.refresh",
+        "title": "Refresh Schema",
+        "category": "BindB",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "bindb.disconnect",
+        "title": "Disconnect",
+        "category": "BindB",
+        "icon": "$(debug-disconnect)"
+      },
+      {
+        "command": "bindb.openConsole",
+        "title": "Open Query Console",
+        "category": "BindB",
+        "icon": "$(terminal)"
+      },
+      {
+        "command": "bindb.selectConnection",
+        "title": "Select Connection for This File",
+        "category": "BindB",
+        "icon": "$(database)"
+      },
+      {
+        "command": "bindb.runStatement",
+        "title": "Run Statement at Cursor",
+        "category": "BindB",
+        "icon": "$(play)"
+      },
+      {
+        "command": "bindb.cancelQuery",
+        "title": "Cancel Running Query",
+        "category": "BindB",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "bindb.previewTable",
+        "title": "Open Table Data",
+        "category": "BindB",
+        "icon": "$(table)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "bindb.addConnection",
+          "when": "view == bindb.explorer",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "bindb.openConsole",
+          "when": "view == bindb.explorer && viewItem =~ /^connection/",
+          "group": "inline@1"
+        },
+        {
+          "command": "bindb.refresh",
+          "when": "view == bindb.explorer && viewItem =~ /^connection/",
+          "group": "inline@2"
+        },
+        {
+          "command": "bindb.disconnect",
+          "when": "view == bindb.explorer && viewItem == connection-open",
+          "group": "1_conn@1"
+        },
+        {
+          "command": "bindb.removeConnection",
+          "when": "view == bindb.explorer && viewItem =~ /^connection/",
+          "group": "9_danger@1"
+        },
+        {
+          "command": "bindb.previewTable",
+          "when": "view == bindb.explorer && viewItem == table",
+          "group": "inline@1"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "bindb.runStatement",
+          "when": "editorLangId == sql",
+          "group": "navigation@1"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "bindb.previewTable",
+          "when": "false"
+        },
+        {
+          "command": "bindb.removeConnection",
+          "when": "false"
+        },
+        {
+          "command": "bindb.disconnect",
+          "when": "false"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "bindb.runStatement",
+        "key": "ctrl+enter",
+        "mac": "cmd+enter",
+        "when": "editorTextFocus && editorLangId == sql"
+      }
+    ]
+  },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "typecheck": "tsc --noEmit -p . && tsc --noEmit -p webview",
+    "test": "node --import tsx --test test/*.test.ts",
+    "notices": "node scripts/notices.mjs",
+    "package": "npm run notices && npm run build -- --production && vsce package --no-dependencies"
+  },
+  "dependencies": {
+    "mysql2": "^3.24.6",
+    "pg": "^8.23.1",
+    "pg-cursor": "^2.22.1",
+    "sql.js": "^1.15.1"
+  },
+  "devDependencies": {
+    "@glideapps/glide-data-grid": "^6.0.3",
+    "@types/node": "^20.19.43",
+    "@types/pg": "^8.23.1",
+    "@types/pg-cursor": "^2.7.2",
+    "@types/react": "^18.3.31",
+    "@types/react-dom": "^18.3.7",
+    "@types/sql.js": "^1.4.11",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^4.0.0",
+    "esbuild": "^0.28.2",
+    "lodash": "^4.18.1",
+    "marked": "^4.3.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-responsive-carousel": "^3.2.23",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  }
+}
