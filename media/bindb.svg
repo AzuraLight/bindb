@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 256 256">
+  <!-- 마켓플레이스 아이콘(icon.svg)과 같은 덩굴 모양의 단색판. 24px에서 굵지 않게 선만 줄였다. -->
+  <g transform="translate(128 128) scale(1.2) translate(-123 -158)">
+    <path d="M94 142A54 54 0 0 1 38 90A54 54 0 0 1 94 142Z" fill="currentColor"/>
+    <path d="M72 216A84.57 84.57 0 0 1 152 104A48 48 0 0 1 200 152A30 30 0 0 1 170 182A18 18 0 0 1 152 164A10 10 0 0 1 162 154" fill="none" stroke="currentColor" stroke-width="17" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>

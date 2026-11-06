@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="stem" gradientUnits="userSpaceOnUse" x1="72" y1="216" x2="200" y2="110"><stop offset="0" stop-color="#14b8a6"/><stop offset="1" stop-color="#4f46e5"/></linearGradient>
+    <linearGradient id="leaf" gradientUnits="userSpaceOnUse" x1="92" y1="142" x2="38" y2="90"><stop offset="0" stop-color="#14b8a6"/><stop offset="1" stop-color="#5eead4"/></linearGradient>
+  </defs>
+  <g transform="translate(128 128) scale(1.2) translate(-123 -158)">
+    <!-- 잎: 밑동을 줄기 획 안쪽(중심선 근처)까지 넣어 붙인다 -->
+    <path d="M94 142A54 54 0 0 1 38 90A54 54 0 0 1 94 142Z" fill="url(#leaf)"/>
+    <!-- 덩굴손: 줄기 원호 + 접선이 이어지는 정원 호 네 개(48 → 30 → 18 → 10) -->
+    <path d="M72 216A84.57 84.57 0 0 1 152 104A48 48 0 0 1 200 152A30 30 0 0 1 170 182A18 18 0 0 1 152 164A10 10 0 0 1 162 154" fill="none" stroke="url(#stem)" stroke-width="22" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>
