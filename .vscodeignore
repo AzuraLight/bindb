@@ -2,6 +2,7 @@
 !out/**
 !media/icon.png
 !media/bindb.svg
+!media/drivers/**
 !package.json
 !README.md
 !CHANGELOG.md

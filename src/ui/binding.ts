@@ -19,6 +19,33 @@ export function boundConnection(doc: vscode.TextDocument, store: ConnectionStore
   return b ? store.findByName(b.name) : undefined;
 }
 
+/** `-- @schema: <스키마>` 주석(Switch schema). @conn 줄 바로 아래 몇 줄 안에서 찾는다 */
+const SCHEMA = /^\s*--\s*@schema:\s*(.+?)\s*$/;
+
+function schemaLine(doc: vscode.TextDocument): { line: number; name: string } | undefined {
+  for (let i = 0; i < Math.min(SCAN_LINES, doc.lineCount); i++) {
+    const m = SCHEMA.exec(doc.lineAt(i).text);
+    if (m) return { line: i, name: m[1] };
+  }
+  return undefined;
+}
+
+export function boundSchema(doc: vscode.TextDocument): string | undefined {
+  return schemaLine(doc)?.name;
+}
+
+export async function setSchemaBinding(doc: vscode.TextDocument, schema: string): Promise<void> {
+  const edit = new vscode.WorkspaceEdit();
+  const existing = schemaLine(doc);
+  const text = `-- @schema: ${schema}`;
+  if (existing) edit.replace(doc.uri, doc.lineAt(existing.line).range, text);
+  else {
+    const conn = bindingLine(doc);
+    edit.insert(doc.uri, new vscode.Position(conn ? conn.line + 1 : 0, 0), `${text}\n`);
+  }
+  await vscode.workspace.applyEdit(edit);
+}
+
 export function bindingName(doc: vscode.TextDocument): string | undefined {
   return bindingLine(doc)?.name;
 }
@@ -75,9 +102,12 @@ export class BindingStatus implements vscode.Disposable {
     const cfg = boundConnection(doc, this.store);
     if (cfg) {
       this.item.text = `$(database) ${cfg.name}`;
+      // 데이터 소스 색
+      this.item.color = cfg.color;
       this.item.tooltip = 'BindB: connection for this file (click to change)';
       this.item.backgroundColor = undefined;
     } else {
+      this.item.color = undefined;
       this.item.text = name ? `$(warning) ${name}` : '$(database) Select connection';
       this.item.tooltip = name ? `BindB: no connection named "${name}"` : 'BindB: choose a connection for this file';
       this.item.backgroundColor = name ? new vscode.ThemeColor('statusBarItem.warningBackground') : undefined;

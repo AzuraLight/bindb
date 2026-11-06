@@ -1,0 +1,982 @@
+/* DataGrip의 Data Sources and Drivers 창 배치를 VS Code 테마 색으로 */
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--vscode-editor-background);
+  color: var(--vscode-foreground);
+  font-family: var(--vscode-font-family);
+  font-size: var(--vscode-font-size);
+  overflow: hidden;
+}
+
+/* 테마 변수가 html · body 어느 쪽에 붙어도 읽히도록 body에서 정의한다 */
+body {
+  --line: var(--vscode-panel-border, var(--vscode-editorGroup-border, rgba(128, 128, 128, 0.35)));
+  --field-border: var(--vscode-input-border, var(--vscode-panel-border, rgba(128, 128, 128, 0.45)));
+  --link: var(--vscode-textLink-foreground);
+  --muted: var(--vscode-descriptionForeground);
+}
+
+/* 왼쪽 목록 | 오른쪽 편집, 아래 줄은 창 전체 폭 */
+.dialog {
+  display: grid;
+  grid-template-columns: minmax(180px, 240px) 1fr;
+  grid-template-rows: 1fr auto;
+  height: 100%;
+}
+
+/* ── 왼쪽 ───────────────────────────── */
+.side {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-right: 1px solid var(--line);
+}
+
+
+.toolbar {
+  display: flex;
+  gap: 4px;
+  padding: 6px 8px;
+}
+
+button.icon {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 24px;
+  padding: 0;
+  color: var(--vscode-icon-foreground, var(--vscode-foreground));
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+}
+
+button.icon:hover:not(:disabled),
+button.icon.active {
+  background: var(--vscode-toolbar-hoverBackground);
+}
+
+/* + 오른쪽 아래의 작은 삼각형(펼침 메뉴 표시) */
+.drop-corner {
+  position: absolute;
+  right: 3px;
+  bottom: 3px;
+  border-left: 4px solid transparent;
+  border-bottom: 4px solid currentColor;
+}
+
+.menu-anchor {
+  position: relative;
+}
+
+.menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 9;
+}
+
+.menu {
+  position: absolute;
+  top: calc(100% + 2px);
+  left: 0;
+  z-index: 10;
+  min-width: 190px;
+  padding: 4px;
+  background: var(--vscode-menu-background, var(--vscode-editorWidget-background));
+  color: var(--vscode-menu-foreground, var(--vscode-foreground));
+  border: 1px solid var(--vscode-menu-border, var(--vscode-widget-border, var(--line)));
+  border-radius: 6px;
+  box-shadow: 0 4px 16px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.36));
+}
+
+.menu button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 8px;
+  color: inherit;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  text-align: left;
+}
+
+.menu button:hover {
+  color: var(--vscode-menu-selectionForeground, inherit);
+  background: var(--vscode-menu-selectionBackground, var(--vscode-list-hoverBackground));
+}
+
+.list {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  padding: 2px 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 28px;
+  padding: 0 12px;
+  cursor: pointer;
+}
+
+.list li:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+.list li.on {
+  color: var(--vscode-list-activeSelectionForeground);
+  background: var(--vscode-list-activeSelectionBackground);
+}
+
+.list li.invalid .name {
+  color: var(--vscode-errorForeground);
+}
+
+.list li.on.invalid .name {
+  color: inherit;
+}
+
+.list .name {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--vscode-gitDecoration-modifiedResourceForeground, #e2c08d);
+}
+
+/* 드라이버 표시(제품 로고 대신 글자 배지) */
+.mark {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 18px;
+  font-size: 9.5px;
+  font-weight: 700;
+  color: #fff;
+  border-radius: 3px;
+}
+
+.mark.postgres {
+  background: #336791;
+}
+
+.mark.mysql {
+  background: #00758f;
+}
+
+.mark.sqlite {
+  background: #4a7c99;
+}
+
+.mark.h2 {
+  background: #2f6a3f;
+}
+
+/* ── 오른쪽 ─────────────────────────── */
+.main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.placeholder {
+  flex: 1;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+}
+
+/* Name · Comment */
+.head {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 420px);
+  gap: 8px 16px;
+  align-items: center;
+  padding: 16px 20px 16px;
+}
+
+.tabs {
+  display: flex;
+  gap: 4px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.tabs button {
+  position: relative;
+  padding: 8px 10px 7px;
+  color: var(--vscode-foreground);
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+
+.tabs button:hover {
+  background: var(--vscode-toolbar-hoverBackground);
+}
+
+.tabs button.on {
+  border-bottom-color: var(--vscode-focusBorder);
+}
+
+.tab-error {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-left: 6px;
+  vertical-align: middle;
+  border-radius: 50%;
+  background: var(--vscode-errorForeground);
+}
+
+.body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 14px 20px 20px;
+}
+
+/* Connection type: …   Driver: … */
+.type-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 24px;
+  margin-bottom: 16px;
+}
+
+.type-line label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+select.link-select {
+  width: auto;
+  height: auto;
+  padding: 0 2px;
+  color: var(--link);
+  background: transparent;
+  border: none;
+  font: inherit;
+  cursor: pointer;
+}
+
+select.link-select:hover {
+  text-decoration: underline;
+}
+
+select.link-select option {
+  color: var(--vscode-dropdown-foreground);
+  background: var(--vscode-dropdown-background);
+}
+
+/* 라벨(왼쪽 정렬) | 칸 */
+.grid {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 8px 16px;
+  align-items: start;
+  max-width: 760px;
+}
+
+.row-label {
+  padding-top: 4px;
+  white-space: nowrap;
+}
+
+.row-label.gap,
+.row-field.gap {
+  margin-top: 10px;
+}
+
+.row-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+/* Host … Port: …  /  Password … Forget */
+.pair {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) max-content 120px;
+  gap: 0 12px;
+  align-items: center;
+}
+
+.pair-label {
+  white-space: nowrap;
+}
+
+.pair-spacer {
+  grid-column: 2 / 4;
+}
+
+.pair .check {
+  grid-column: 2 / 4;
+}
+
+.with-button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.with-button input {
+  flex: 1;
+  min-width: 0;
+}
+
+input:not([type]),
+input[type='password'],
+select {
+  box-sizing: border-box;
+  width: 100%;
+  height: 26px;
+  padding: 3px 7px;
+  font: inherit;
+  color: var(--vscode-input-foreground);
+  background: var(--vscode-input-background);
+  border: 1px solid var(--field-border);
+  border-radius: 3px;
+  outline: none;
+}
+
+select {
+  color: var(--vscode-dropdown-foreground);
+  background: var(--vscode-dropdown-background);
+  border-color: var(--vscode-dropdown-border, var(--field-border));
+}
+
+select.short {
+  width: 200px;
+}
+
+input:focus,
+select:focus {
+  border-color: var(--vscode-focusBorder);
+}
+
+input:disabled,
+select:disabled {
+  opacity: 0.5;
+}
+
+input.bad {
+  border-color: var(--vscode-inputValidation-errorBorder, var(--vscode-errorForeground));
+}
+
+input::placeholder {
+  color: var(--vscode-input-placeholderForeground, var(--muted));
+}
+
+input.num {
+  width: 70px;
+}
+
+.error {
+  color: var(--vscode-errorForeground);
+}
+
+.hint,
+.note {
+  color: var(--muted);
+  font-size: 0.92em;
+}
+
+.note {
+  margin: 12px 0 0;
+}
+
+.check {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+}
+
+.check.big {
+  margin-bottom: 12px;
+}
+
+.indent {
+  padding-left: 26px;
+}
+
+.indent.disabled .row-label {
+  opacity: 0.5;
+}
+
+/* Options 탭의 구역 제목: 글자 + 가로줄 */
+.section h3 {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 10px;
+  font-size: 1em;
+  font-weight: 400;
+}
+
+.section h3::after {
+  content: '';
+  flex: 1;
+  border-top: 1px solid var(--line);
+}
+
+.section-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-left: 16px;
+}
+
+.inline-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* 오른쪽 아래 띠: Test Connection + 서버 버전 */
+.test-bar {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  min-height: 40px;
+  padding: 0 20px;
+  border-top: 1px solid var(--line);
+}
+
+button.link {
+  padding: 0;
+  color: var(--link);
+  background: none;
+  border: none;
+  white-space: nowrap;
+}
+
+button.link:hover:not(:disabled) {
+  text-decoration: underline;
+}
+
+.test {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--muted);
+}
+
+.test.fail {
+  color: var(--vscode-errorForeground);
+}
+
+/* 창 전체 폭 아래 줄 */
+.footer {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--line);
+}
+
+.footer-error {
+  flex: 1;
+  min-width: 0;
+  color: var(--vscode-errorForeground);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* 단추 */
+button {
+  font: inherit;
+  cursor: pointer;
+}
+
+.footer button {
+  min-width: 80px;
+  height: 28px;
+  padding: 0 14px;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+.footer button.secondary {
+  color: var(--vscode-button-secondaryForeground);
+  background: var(--vscode-button-secondaryBackground);
+  border: 1px solid var(--vscode-button-border, var(--field-border));
+}
+
+.footer button.secondary:hover:not(:disabled) {
+  background: var(--vscode-button-secondaryHoverBackground);
+}
+
+.footer button.primary {
+  color: var(--vscode-button-foreground);
+  background: var(--vscode-button-background);
+  border: 1px solid var(--vscode-button-border, transparent);
+}
+
+.footer button.primary:hover:not(:disabled) {
+  background: var(--vscode-button-hoverBackground);
+}
+
+button.dots,
+button.text-button {
+  height: 26px;
+  padding: 0 8px;
+  color: var(--vscode-foreground);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 3px;
+}
+
+button.dots:hover,
+button.text-button:hover {
+  background: var(--vscode-toolbar-hoverBackground);
+}
+
+button.text-button {
+  color: var(--link);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+button:focus-visible,
+select.link-select:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
+}
+
+@media (max-width: 620px) {
+  .dialog {
+    grid-template-columns: 160px 1fr;
+  }
+
+  .pair {
+    grid-template-columns: minmax(0, 1fr) max-content 80px;
+  }
+}
+
+/* ── 왼쪽: Data Sources | Drivers 탭 · 목록 무리 · Problems ── */
+.side-head {
+  display: flex;
+  gap: 14px;
+  padding: 10px 12px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.side-tab {
+  padding: 0 2px 7px;
+  font-weight: 600;
+  color: var(--muted);
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+
+.side-tab.on {
+  color: var(--vscode-foreground);
+  border-bottom-color: var(--vscode-focusBorder);
+}
+
+.toolbar-gap {
+  flex: 1;
+}
+
+.list-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.group-title {
+  padding: 8px 12px 4px;
+  font-weight: 600;
+}
+
+.side-note {
+  padding: 0 12px;
+}
+
+.problems {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 8px 12px 8px 38px;
+  text-align: left;
+  color: var(--vscode-foreground);
+  background: none;
+  border: none;
+  border-top: 1px solid var(--line);
+}
+
+.problems:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+.problems.on {
+  color: var(--vscode-list-activeSelectionForeground);
+  background: var(--vscode-list-activeSelectionBackground);
+}
+
+.badge {
+  min-width: 16px;
+  padding: 0 5px;
+  font-size: 0.85em;
+  text-align: center;
+  color: var(--vscode-badge-foreground);
+  background: var(--vscode-badge-background);
+  border-radius: 8px;
+}
+
+.logo {
+  flex: none;
+  display: block;
+}
+
+/* 오른쪽 클릭 메뉴 */
+.menu.context {
+  position: fixed;
+  z-index: 20;
+}
+
+.menu button:disabled {
+  opacity: 0.45;
+}
+
+.menu-sep {
+  margin: 4px 2px;
+  border-top: 1px solid var(--vscode-menu-separatorBackground, var(--line));
+}
+
+.menu-label {
+  padding: 4px 8px 2px;
+  font-size: 0.9em;
+  color: var(--muted);
+}
+
+.menu .indent-item {
+  padding-left: 16px;
+}
+
+/* ── 오른쪽 탭 내용 ── */
+.opt-grid {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 420px);
+  gap: 8px 14px;
+  align-items: center;
+}
+
+.opt-grid label {
+  white-space: nowrap;
+}
+
+textarea {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 5px 7px;
+  font-family: var(--vscode-editor-font-family);
+  font-size: var(--vscode-editor-font-size, inherit);
+  color: var(--vscode-input-foreground);
+  background: var(--vscode-input-background);
+  border: 1px solid var(--field-border);
+  border-radius: 3px;
+  outline: none;
+  resize: vertical;
+}
+
+textarea:focus {
+  border-color: var(--vscode-focusBorder);
+}
+
+textarea:disabled {
+  opacity: 0.5;
+}
+
+input.mid,
+select.mid {
+  width: 300px;
+  max-width: 100%;
+}
+
+.check.small {
+  font-size: 0.92em;
+  color: var(--muted);
+}
+
+.grid-note {
+  grid-column: 2;
+  margin: 0;
+}
+
+.indent-check {
+  padding-left: 0;
+}
+
+.checks {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.divider {
+  margin: 18px 0 14px;
+  border: none;
+  border-top: 1px solid var(--line);
+}
+
+/* Schemas */
+.schema-tools {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.schema-tree {
+  max-height: 240px;
+  min-height: 80px;
+  margin-bottom: 16px;
+  padding: 6px 8px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+}
+
+.tree-db-name {
+  display: block;
+  padding: 3px 0;
+  font-weight: 600;
+  color: var(--vscode-foreground);
+  background: none;
+  border: none;
+}
+
+.tree-schema {
+  display: flex;
+  padding: 3px 0 3px 18px;
+}
+
+/* Advanced: 이름 | 값 표 */
+table.kv {
+  width: 100%;
+  max-width: 760px;
+  border-collapse: collapse;
+}
+
+table.kv th {
+  padding: 4px 6px;
+  font-weight: 600;
+  text-align: left;
+  border-bottom: 1px solid var(--line);
+}
+
+table.kv td {
+  padding: 3px 4px 3px 0;
+}
+
+.adv-grid {
+  margin-top: 16px;
+}
+
+/* Drivers · Problems 페이지 */
+.page-title {
+  margin: 0 0 14px;
+  font-size: 1.15em;
+  font-weight: 600;
+}
+
+.driver-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.driver-head .page-title {
+  margin: 0;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+code.template {
+  display: block;
+  padding: 2px 0;
+  font-family: var(--vscode-editor-font-family);
+}
+
+.link.usage {
+  display: block;
+  padding: 2px 0;
+  text-align: left;
+}
+
+.problem-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.problem-list li {
+  display: flex;
+  gap: 12px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.opt-grid select.link-select {
+  justify-self: start;
+}
+
+.name-line {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.name-line input:not(.num) {
+  flex: 1;
+  min-width: 0;
+}
+
+.name-line select.short {
+  flex: none;
+}
+
+.head {
+  grid-template-columns: max-content minmax(0, 620px);
+}
+
+/* 데이터 소스 색 */
+.color-dot {
+  position: relative;
+  flex: none;
+  width: 18px;
+  height: 18px;
+  border: 1px solid var(--field-border);
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+.color-dot input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.color-mark {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.sub-title {
+  margin-top: 6px;
+  font-weight: 600;
+}
+
+table.templates td.center {
+  text-align: center;
+}
+
+.template-actions {
+  margin-top: 16px;
+}
+
+.placeholder.mismatch {
+  height: 100%;
+  padding: 24px;
+  text-align: center;
+}
+
+/* ── 선택 상자: VSCode Elements vscode-single-select ── */
+vscode-single-select {
+  width: 100%;
+}
+
+vscode-single-select.short {
+  width: 200px;
+}
+
+vscode-single-select.mid {
+  width: 300px;
+  max-width: 100%;
+}
+
+/* ── 링크 모양 선택(Driver: PostgreSQL ▾) ── */
+.link-select-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+button.link-select {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0 2px;
+  font: inherit;
+  color: var(--link);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+}
+
+button.link-select:hover:not(:disabled) {
+  text-decoration: underline;
+}
+
+button.link-select:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
+}
+
+.link-select-wrap .menu {
+  top: calc(100% + 4px);
+  min-width: 160px;
+}
+
+.menu button.active {
+  color: var(--vscode-menu-selectionForeground, inherit);
+  background: var(--vscode-menu-selectionBackground, var(--vscode-list-hoverBackground));
+}
+
+.check-mark {
+  display: inline-block;
+  width: 14px;
+}

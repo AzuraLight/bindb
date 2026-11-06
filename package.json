@@ -2,7 +2,7 @@
   "name": "bindb",
   "displayName": "BindB — Database IDE",
   "description": "Schema-aware SQL editing and a fast result grid for PostgreSQL, MySQL, SQLite and H2.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "AzuraLight",
   "author": {
     "name": "AzuraLight"
@@ -34,7 +34,7 @@
     "database client"
   ],
   "engines": {
-    "vscode": "^1.85.0"
+    "vscode": "^1.103.0"
   },
   "categories": [
     "Programming Languages",
@@ -94,6 +94,25 @@
               },
               "readOnly": {
                 "type": "boolean"
+              },
+              "ssl": {
+                "type": "string",
+                "enum": [
+                  "disable",
+                  "require",
+                  "verify"
+                ],
+                "default": "disable",
+                "description": "PostgreSQL / MySQL: require = encrypt without checking the certificate, verify = encrypt and check it."
+              },
+              "connectTimeout": {
+                "type": "number",
+                "minimum": 1,
+                "maximum": 600,
+                "description": "Seconds to wait when connecting (default 10)."
+              },
+              "comment": {
+                "type": "string"
               }
             }
           }
@@ -108,6 +127,86 @@
           "default": 500,
           "minimum": 50,
           "description": "Rows fetched per page in the result grid."
+        },
+        "bindb.ai.mcpServer.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Run a local MCP server (127.0.0.1, token required) so AI agents — Copilot agent mode, Claude Code, Codex — can read schemas and run read-only queries on BindB connections."
+        },
+        "bindb.ai.mcpServer.port": {
+          "type": "number",
+          "default": 47863,
+          "minimum": 1024,
+          "maximum": 65535,
+          "description": "Port of the local MCP server."
+        },
+        "bindb.ai.allowWrites": {
+          "type": "boolean",
+          "default": false,
+          "description": "Let AI tools run statements that change data or schema (each one still needs your confirmation; read-only connections are never written)."
+        },
+        "bindb.ssh.configurations": {
+          "type": "array",
+          "default": [],
+          "description": "SSH configurations shared by data sources (edited from the SSH/SSL tab of the Data Sources panel). Passwords and key passphrases are kept in the OS keychain.",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "name",
+              "host",
+              "user",
+              "auth"
+            ],
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "host": {
+                "type": "string"
+              },
+              "port": {
+                "type": "number"
+              },
+              "user": {
+                "type": "string"
+              },
+              "auth": {
+                "type": "string",
+                "enum": [
+                  "password",
+                  "key",
+                  "agent"
+                ]
+              },
+              "keyFile": {
+                "type": "string"
+              },
+              "parseConfig": {
+                "type": "boolean"
+              },
+              "keepAlive": {
+                "type": "number"
+              },
+              "strictHostKey": {
+                "type": "string",
+                "enum": [
+                  "yes",
+                  "acceptNew",
+                  "no",
+                  "ask"
+                ]
+              }
+            }
+          }
+        },
+        "bindb.dataSourceTemplates": {
+          "type": "array",
+          "default": [],
+          "description": "Data source templates (settings without credentials), managed from the Data Sources panel."
         }
       }
     },
@@ -140,6 +239,18 @@
         "title": "Add Connection",
         "category": "BindB",
         "icon": "$(add)"
+      },
+      {
+        "command": "bindb.editConnection",
+        "title": "Edit Connection",
+        "category": "BindB",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "bindb.manageConnections",
+        "title": "Manage Connections",
+        "category": "BindB",
+        "icon": "$(settings-gear)"
       },
       {
         "command": "bindb.removeConnection",
@@ -188,14 +299,154 @@
         "title": "Open Table Data",
         "category": "BindB",
         "icon": "$(table)"
+      },
+      {
+        "command": "bindb.add.postgres",
+        "title": "PostgreSQL",
+        "category": "BindB: Add Connection"
+      },
+      {
+        "command": "bindb.add.mysql",
+        "title": "MySQL / MariaDB",
+        "category": "BindB: Add Connection"
+      },
+      {
+        "command": "bindb.add.sqlite",
+        "title": "SQLite",
+        "category": "BindB: Add Connection"
+      },
+      {
+        "command": "bindb.add.h2",
+        "title": "H2",
+        "category": "BindB: Add Connection"
+      },
+      {
+        "command": "bindb.commit",
+        "title": "Commit",
+        "category": "BindB",
+        "icon": "$(check)"
+      },
+      {
+        "command": "bindb.rollback",
+        "title": "Rollback",
+        "category": "BindB",
+        "icon": "$(discard)"
+      },
+      {
+        "command": "bindb.switchSchema",
+        "title": "Switch Schema",
+        "category": "BindB",
+        "icon": "$(symbol-namespace)"
+      },
+      {
+        "command": "bindb.ddl.create",
+        "title": "Create DDL Mapping",
+        "category": "BindB"
+      },
+      {
+        "command": "bindb.ddl.dump",
+        "title": "DDL Mapping: Dump to DDL Data Source",
+        "category": "BindB"
+      },
+      {
+        "command": "bindb.ddl.update",
+        "title": "DDL Mapping: Update from Data Source",
+        "category": "BindB"
+      },
+      {
+        "command": "bindb.ddl.apply",
+        "title": "DDL Mapping: Apply to Data Source",
+        "category": "BindB"
+      },
+      {
+        "command": "bindb.ai.enableMcp",
+        "title": "Enable MCP Server for AI Agents",
+        "category": "BindB"
+      },
+      {
+        "command": "bindb.ai.disableMcp",
+        "title": "Disable MCP Server for AI Agents",
+        "category": "BindB"
+      },
+      {
+        "command": "bindb.ai.setupClaudeCode",
+        "title": "Connect Claude Code (MCP)",
+        "category": "BindB"
+      },
+      {
+        "command": "bindb.ai.setupCodex",
+        "title": "Connect Codex (MCP)",
+        "category": "BindB"
+      },
+      {
+        "command": "bindb.ai.copySchema",
+        "title": "Copy Schema for AI Chat",
+        "category": "BindB"
+      },
+      {
+        "command": "bindb.ai.rotateToken",
+        "title": "Regenerate MCP Token",
+        "category": "BindB"
+      },
+      {
+        "command": "bindb.runAll",
+        "title": "Run All Statements",
+        "category": "BindB",
+        "icon": "$(run-all)"
+      },
+      {
+        "command": "bindb.virtual.addForeignKey",
+        "title": "Add Virtual Foreign Key",
+        "category": "BindB"
+      },
+      {
+        "command": "bindb.virtual.addColumn",
+        "title": "Add Virtual Column",
+        "category": "BindB"
+      },
+      {
+        "command": "bindb.virtual.addView",
+        "title": "Add Virtual View",
+        "category": "BindB"
+      },
+      {
+        "command": "bindb.virtual.remove",
+        "title": "Remove Virtual Object",
+        "category": "BindB"
+      },
+      {
+        "command": "bindb.virtual.openFile",
+        "title": "Open Virtual Objects File",
+        "category": "BindB"
+      },
+      {
+        "command": "bindb.virtual.openView",
+        "title": "Open Virtual View",
+        "category": "BindB"
+      },
+      {
+        "command": "bindb.queryHistory",
+        "title": "Query History",
+        "category": "BindB",
+        "icon": "$(history)"
+      },
+      {
+        "command": "bindb.clearHistory",
+        "title": "Clear Query History",
+        "category": "BindB"
       }
     ],
     "menus": {
       "view/title": [
         {
-          "command": "bindb.addConnection",
+          "submenu": "bindb.addMenu",
           "when": "view == bindb.explorer",
-          "group": "navigation"
+          "group": "navigation@1"
+        },
+        {
+          "command": "bindb.manageConnections",
+          "when": "view == bindb.explorer",
+          "group": "navigation@2"
         }
       ],
       "view/item/context": [
@@ -208,6 +459,11 @@
           "command": "bindb.refresh",
           "when": "view == bindb.explorer && viewItem =~ /^connection/",
           "group": "inline@2"
+        },
+        {
+          "command": "bindb.editConnection",
+          "when": "view == bindb.explorer && viewItem =~ /^connection/",
+          "group": "1_conn@0"
         },
         {
           "command": "bindb.disconnect",
@@ -223,6 +479,71 @@
           "command": "bindb.previewTable",
           "when": "view == bindb.explorer && viewItem == table",
           "group": "inline@1"
+        },
+        {
+          "command": "bindb.ddl.create",
+          "when": "view == bindb.explorer && viewItem =~ /^connection/ && viewItem !~ /mapped/",
+          "group": "5_ddl@1"
+        },
+        {
+          "command": "bindb.ddl.dump",
+          "when": "view == bindb.explorer && viewItem =~ /mapped/",
+          "group": "5_ddl@2"
+        },
+        {
+          "command": "bindb.ddl.update",
+          "when": "view == bindb.explorer && viewItem == ddlsource",
+          "group": "5_ddl@1"
+        },
+        {
+          "command": "bindb.ddl.apply",
+          "when": "view == bindb.explorer && viewItem == ddlsource",
+          "group": "5_ddl@2"
+        },
+        {
+          "command": "bindb.editConnection",
+          "when": "view == bindb.explorer && viewItem == ddlsource",
+          "group": "1_conn@0"
+        },
+        {
+          "command": "bindb.removeConnection",
+          "when": "view == bindb.explorer && viewItem == ddlsource",
+          "group": "9_danger@1"
+        },
+        {
+          "command": "bindb.refresh",
+          "when": "view == bindb.explorer && viewItem == ddlsource",
+          "group": "inline@2"
+        },
+        {
+          "command": "bindb.ai.copySchema",
+          "when": "view == bindb.explorer && viewItem =~ /^(connection|ddlsource)/",
+          "group": "6_ai@1"
+        },
+        {
+          "command": "bindb.virtual.addForeignKey",
+          "when": "view == bindb.explorer && viewItem == table",
+          "group": "7_virtual@1"
+        },
+        {
+          "command": "bindb.virtual.addColumn",
+          "when": "view == bindb.explorer && viewItem == table",
+          "group": "7_virtual@2"
+        },
+        {
+          "command": "bindb.virtual.addView",
+          "when": "view == bindb.explorer && viewItem =~ /^(schema|connection)/",
+          "group": "7_virtual@1"
+        },
+        {
+          "command": "bindb.virtual.openFile",
+          "when": "view == bindb.explorer && viewItem =~ /^connection/",
+          "group": "7_virtual@2"
+        },
+        {
+          "command": "bindb.virtual.remove",
+          "when": "view == bindb.explorer && viewItem == virtual",
+          "group": "9_danger@1"
         }
       ],
       "editor/title": [
@@ -230,6 +551,26 @@
           "command": "bindb.runStatement",
           "when": "editorLangId == sql",
           "group": "navigation@1"
+        },
+        {
+          "command": "bindb.runAll",
+          "when": "editorLangId == sql",
+          "group": "navigation@1"
+        },
+        {
+          "command": "bindb.commit",
+          "when": "editorLangId == sql",
+          "group": "navigation@2"
+        },
+        {
+          "command": "bindb.rollback",
+          "when": "editorLangId == sql",
+          "group": "navigation@3"
+        },
+        {
+          "command": "bindb.queryHistory",
+          "when": "editorLangId == sql",
+          "group": "navigation@4"
         }
       ],
       "commandPalette": [
@@ -244,6 +585,80 @@
         {
           "command": "bindb.disconnect",
           "when": "false"
+        },
+        {
+          "command": "bindb.add.postgres",
+          "when": "false"
+        },
+        {
+          "command": "bindb.add.mysql",
+          "when": "false"
+        },
+        {
+          "command": "bindb.add.sqlite",
+          "when": "false"
+        },
+        {
+          "command": "bindb.add.h2",
+          "when": "false"
+        },
+        {
+          "command": "bindb.ddl.create",
+          "when": "false"
+        },
+        {
+          "command": "bindb.ddl.dump",
+          "when": "false"
+        },
+        {
+          "command": "bindb.ddl.update",
+          "when": "false"
+        },
+        {
+          "command": "bindb.ddl.apply",
+          "when": "false"
+        },
+        {
+          "command": "bindb.virtual.addForeignKey",
+          "when": "false"
+        },
+        {
+          "command": "bindb.virtual.addColumn",
+          "when": "false"
+        },
+        {
+          "command": "bindb.virtual.addView",
+          "when": "false"
+        },
+        {
+          "command": "bindb.virtual.remove",
+          "when": "false"
+        },
+        {
+          "command": "bindb.virtual.openFile",
+          "when": "false"
+        },
+        {
+          "command": "bindb.virtual.openView",
+          "when": "false"
+        }
+      ],
+      "bindb.addMenu": [
+        {
+          "command": "bindb.add.postgres",
+          "group": "1_drivers@0"
+        },
+        {
+          "command": "bindb.add.mysql",
+          "group": "1_drivers@1"
+        },
+        {
+          "command": "bindb.add.sqlite",
+          "group": "1_drivers@2"
+        },
+        {
+          "command": "bindb.add.h2",
+          "group": "1_drivers@3"
         }
       ]
     },
@@ -253,6 +668,25 @@
         "key": "ctrl+enter",
         "mac": "cmd+enter",
         "when": "editorTextFocus && editorLangId == sql"
+      },
+      {
+        "command": "bindb.queryHistory",
+        "key": "ctrl+alt+e",
+        "mac": "cmd+alt+e",
+        "when": "editorLangId == sql"
+      }
+    ],
+    "submenus": [
+      {
+        "id": "bindb.addMenu",
+        "label": "Add Connection",
+        "icon": "$(add)"
+      }
+    ],
+    "mcpServerDefinitionProviders": [
+      {
+        "id": "bindb",
+        "label": "BindB"
       }
     ]
   },
@@ -262,23 +696,30 @@
     "typecheck": "tsc --noEmit -p . && tsc --noEmit -p webview",
     "test": "node --import tsx --test test/*.test.ts",
     "notices": "node scripts/notices.mjs",
-    "package": "npm run notices && npm run build -- --production && vsce package --no-dependencies"
+    "package": "npm run notices && npm run build -- --production && vsce package --no-dependencies",
+    "test:integration": "npm run build && vscode-test"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.2",
     "mysql2": "^3.24.6",
     "pg": "^8.23.1",
     "pg-cursor": "^2.22.1",
-    "sql.js": "^1.15.1"
+    "ssh2": "1.17.0",
+    "zod": "3.25.76"
   },
   "devDependencies": {
     "@glideapps/glide-data-grid": "^6.0.3",
-    "@types/node": "^20.19.43",
+    "@types/node": "^22.20.5",
     "@types/pg": "^8.23.1",
     "@types/pg-cursor": "^2.7.2",
     "@types/react": "^18.3.31",
     "@types/react-dom": "^18.3.7",
-    "@types/sql.js": "^1.4.11",
-    "@types/vscode": "^1.85.0",
+    "@types/ssh2": "^1.15.6",
+    "@types/vscode": "^1.101.0",
+    "@vscode-elements/elements": "^2.5.1",
+    "@vscode-elements/react-elements": "^2.4.0",
+    "@vscode/test-cli": "^0.0.15",
+    "@vscode/test-electron": "^3.1.0",
     "@vscode/vsce": "^4.0.0",
     "esbuild": "^0.28.2",
     "lodash": "^4.18.1",
@@ -288,5 +729,17 @@
     "react-responsive-carousel": "^3.2.23",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2"
+  },
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "In an untrusted workspace, BindB ignores connections, the H2 jar path and SSH configurations defined in the workspace settings, because connecting can run programs (H2 java options, Before connection tasks) and SQL (startup scripts).",
+      "restrictedConfigurations": [
+        "bindb.connections",
+        "bindb.h2.jarPath",
+        "bindb.ssh.configurations",
+        "bindb.dataSourceTemplates"
+      ]
+    }
   }
 }

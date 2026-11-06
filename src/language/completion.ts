@@ -1,4 +1,7 @@
 import * as vscode from 'vscode';
+import { systemCatalog } from './systemCatalog';
+import { joinCondition, tableKey } from '../core/virtual';
+import type { VirtualStore } from '../ui/virtualObjects';
 import type { ConnectionStore } from '../core/connections';
 import type { SessionManager } from '../core/sessions';
 import { drivers, type ConnectionConfig, type DriverId, type MetaTable } from '../drivers';
@@ -42,14 +45,15 @@ export class SqlCompletionProvider implements vscode.CompletionItemProvider {
   constructor(
     private readonly store: ConnectionStore,
     private readonly sessions: SessionManager,
+    private readonly virtual?: VirtualStore,
   ) {}
 
   async provideCompletionItems(doc: vscode.TextDocument, position: vscode.Position): Promise<vscode.CompletionItem[]> {
     const offset = doc.offsetAt(position);
-    const ctx = completionContext(statementAt(splitStatements(doc.getText()), offset), offset);
+    const cfg = boundConnection(doc, this.store);
+    const ctx = completionContext(statementAt(splitStatements(doc.getText(), cfg?.driver), offset), offset);
     if (ctx.kind === 'none') return [];
 
-    const cfg = boundConnection(doc, this.store);
     const tables = cfg ? await this.tables(cfg) : [];
     const driver = cfg?.driver ?? 'postgres';
     const defaultSchema = cfg ? drivers[cfg.driver].defaultSchema(cfg) : undefined;
@@ -64,6 +68,30 @@ export class SqlCompletionProvider implements vscode.CompletionItemProvider {
           item.insertText = quoteIdent(driver, schema);
           item.detail = 'schema';
           item.sortText = `2${schema}`;
+          items.push(item);
+        }
+      }
+    }
+
+    // 가상 외래키: `JOIN b ON |` 에서 앞 테이블과 잇는 조건을 제안한다
+    if (ctx.kind === 'column' && !ctx.qualifier && cfg && this.virtual && ctx.refs.length >= 2) {
+      const before = doc.getText(new vscode.Range(position.with(undefined, 0), position));
+      if (/\bON\s+\w*$/i.test(before)) {
+        const v = await this.virtual.get(cfg).catch(() => undefined);
+        const last = ctx.refs[ctx.refs.length - 1];
+        const right = resolveRef(last, tables, defaultSchema);
+        for (const ref of ctx.refs.slice(0, -1)) {
+          const left = resolveRef(ref, tables, defaultSchema);
+          if (!v || !left || !right) continue;
+          const cond = joinCondition(
+            v,
+            { table: tableKey(left.schema, left.name), alias: ref.alias ?? ref.name },
+            { table: tableKey(right.schema, right.name), alias: last.alias ?? last.name },
+          );
+          if (!cond) continue;
+          const item = new vscode.CompletionItem(cond, vscode.CompletionItemKind.Reference);
+          item.detail = 'virtual foreign key';
+          item.sortText = `0${cond}`;
           items.push(item);
         }
       }
@@ -112,7 +140,9 @@ export class SqlCompletionProvider implements vscode.CompletionItemProvider {
   private async tables(cfg: ConnectionConfig): Promise<MetaTable[]> {
     const meta = this.sessions.cachedMetadata(cfg.id) ?? this.sessions.metadata(cfg);
     const timeout = new Promise<MetaTable[]>((resolve) => setTimeout(() => resolve([]), 1500));
-    return Promise.race([meta.catch(() => [] as MetaTable[]), timeout]);
+    const tables = await Promise.race([meta.catch(() => [] as MetaTable[]), timeout]);
+    // Use pre-introspected objects for system catalogs that are not introspected(기본 켬)
+    return cfg.preIntrospected === false ? tables : [...tables, ...systemCatalog(cfg.driver, tables)];
   }
 
   private tableItem(t: MetaTable, driver: DriverId, qualify: boolean): vscode.CompletionItem {

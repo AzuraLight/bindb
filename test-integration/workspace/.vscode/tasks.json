@@ -1,0 +1,7 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    { "label": "prepare-db", "type": "shell", "command": "echo ready > \"${workspaceFolder}/prepared.txt\"" },
+    { "label": "broken", "type": "shell", "command": "exit 3" }
+  ]
+}

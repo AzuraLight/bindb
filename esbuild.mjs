@@ -1,5 +1,5 @@
 import * as esbuild from 'esbuild';
-import { copyFileSync, mkdirSync, rmSync } from 'node:fs';
+import { rmSync } from 'node:fs';
 
 const watch = process.argv.includes('--watch');
 const production = process.argv.includes('--production');
@@ -17,17 +17,19 @@ const common = {
 const contexts = await Promise.all([
   esbuild.context({
     ...common,
-    entryPoints: ['src/extension.ts'],
-    outfile: 'out/extension.js',
+    // sqliteHost: SQLite를 돌리는 자식 프로세스(src/drivers/sqlite.ts가 fork한다)
+    entryPoints: { extension: 'src/extension.ts', sqliteHost: 'src/drivers/sqliteHost.ts' },
+    outdir: 'out',
     platform: 'node',
     format: 'cjs',
     target: 'node18',
-    external: ['vscode', 'pg-native'],
+    // ssh2의 선택적 네이티브 가속(cpu-features · sshcrypto.node)은 없으면 순수 JS로 돈다. 번들에서 뺀다.
+    external: ['vscode', 'pg-native', 'cpu-features', '*.node'],
   }),
   esbuild.context({
     ...common,
-    entryPoints: ['webview/grid/main.tsx'],
-    outfile: 'out/webview/grid.js',
+    entryPoints: { grid: 'webview/grid/main.tsx', connection: 'webview/connection/main.tsx' },
+    outdir: 'out/webview',
     platform: 'browser',
     format: 'iife',
     target: 'es2020',
@@ -35,9 +37,9 @@ const contexts = await Promise.all([
   }),
 ]);
 
-// sql.js는 wasm 파일을 런타임에 extension.js 옆에서 읽는다.
-mkdirSync('out', { recursive: true });
-copyFileSync('node_modules/sql.js/dist/sql-wasm.wasm', 'out/sql-wasm.wasm');
+// 예전 SQLite wasm 파일이 out/에 남아 패키지에 들어가지 않게 지운다
+rmSync('out/sql-wasm.wasm', { force: true });
+rmSync('out/sqlite3.wasm', { force: true });
 
 if (watch) {
   await Promise.all(contexts.map((c) => c.watch()));

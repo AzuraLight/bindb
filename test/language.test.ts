@@ -109,4 +109,11 @@ describe('completionContext', () => {
     assert.equal(ctx("select 'ab|c' from t").kind, 'none');
     assert.equal(ctx('select 1 -- note |').kind, 'none');
   });
+
+  it('BEGIN with a mode at the start of a statement is a transaction, not a block', () => {
+    assert.equal(splitStatements('BEGIN IMMEDIATE; INSERT INTO t VALUES (1); COMMIT;', 'sqlite').length, 3);
+    assert.equal(splitStatements('BEGIN ISOLATION LEVEL SERIALIZABLE; SELECT 1; COMMIT', 'postgres').length, 3);
+    // 트리거 본문 BEGIN … END 는 여전히 한 문장
+    assert.equal(splitStatements('CREATE TRIGGER x AFTER INSERT ON a BEGIN UPDATE b SET y = 1; DELETE FROM c; END; SELECT 1', 'sqlite').length, 2);
+  });
 });

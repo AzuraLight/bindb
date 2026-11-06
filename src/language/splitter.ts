@@ -1,4 +1,4 @@
-import { tokenize, type Token } from './tokenizer';
+import { tokenize, type SqlDialect, type Token } from './tokenizer';
 
 export interface Statement {
   text: string;
@@ -13,8 +13,8 @@ const BLOCK_OPENERS = new Set(['BEGIN', 'CASE']);
 /** MySQL 프로시저의 END IF / END LOOP … 는 BEGIN을 닫지 않는다(여는 쪽도 세지 않으므로). */
 const NON_BLOCK_ENDS = new Set(['IF', 'LOOP', 'WHILE', 'REPEAT', 'FOR']);
 
-export function splitStatements(text: string): Statement[] {
-  const tokens = tokenize(text);
+export function splitStatements(text: string, dialect?: SqlDialect): Statement[] {
+  const tokens = tokenize(text, dialect);
   const out: Statement[] = [];
   let current: Token[] = [];
   let depth = 0;
@@ -39,8 +39,10 @@ export function splitStatements(text: string): Statement[] {
     if (t.type === 'word') {
       const w = t.text.toUpperCase();
       const next = tokens[k + 1]?.text.toUpperCase();
-      // BEGIN; / BEGIN TRANSACTION / BEGIN WORK 은 트랜잭션 시작이지 블록이 아니다.
-      if (w === 'BEGIN' && (next === undefined || next === ';' || next === 'TRANSACTION' || next === 'WORK')) {
+      // 문장 맨 앞의 BEGIN은 트랜잭션 시작이다(BEGIN · BEGIN TRANSACTION · BEGIN WORK · SQLite BEGIN IMMEDIATE/DEFERRED/EXCLUSIVE ·
+      // PostgreSQL BEGIN ISOLATION LEVEL …). 블록 BEGIN(트리거 · 프로시저 본문)은 CREATE … 뒤에 오므로 문장 맨 앞이 아니다.
+      const atStart = !current.some((x) => x.type !== 'comment');
+      if (w === 'BEGIN' && (atStart || next === undefined || next === ';' || next === 'TRANSACTION' || next === 'WORK')) {
         // 블록 아님
       } else if (BLOCK_OPENERS.has(w)) {
         depth++;

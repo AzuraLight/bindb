@@ -10,11 +10,28 @@ export interface Token {
   open?: boolean;
 }
 
+/** 문법 규칙을 고를 DB. 없으면(연결 모름) 여러 방언을 너그럽게 받아들이는 예전 규칙 */
+export type SqlDialect = 'postgres' | 'mysql' | 'sqlite' | 'h2';
+
 /**
  * 작성 중인(깨진) SQL도 끝까지 토큰으로 나누는 관용 토크나이저.
- * 방언 차이는 최소만 다룬다: '…', "…", `…`, [..](mssql), $tag$…$tag$(pg), --, #(mysql), /* *\/.
+ * 방언별 규칙(공식 문서):
+ *  - postgres: '…'에서 백슬래시는 글자 그대로(standard_conforming_strings 기본 on), E'…'만 \ 이스케이프,
+ *    $tag$…$tag$, /* *\/는 중첩, #은 연산자 — https://www.postgresql.org/docs/current/sql-syntax-lexical.html
+ *  - mysql: '…' · "…"에서 \ 이스케이프, # 주석, --는 뒤에 공백 · 제어 문자가 있어야 주석, /* *\/ 중첩 없음,
+ *    /*! … *\/ 는 실행되는 코드 — https://dev.mysql.com/doc/refman/8.4/en/comments.html ,
+ *    https://dev.mysql.com/doc/refman/8.4/en/string-literals.html
+ *  - sqlite: 백슬래시 이스케이프 없음, -- · /* *\/(중첩 없음) — https://www.sqlite.org/lang_expr.html ,
+ *    https://www.sqlite.org/lang_comment.html
+ *  - h2: 백슬래시 이스케이프 없음, -- · // · /* *\/(중첩), $$…$$ — https://h2database.com/html/grammar.html
  */
-export function tokenize(text: string): Token[] {
+export function tokenize(text: string, dialect?: SqlDialect): Token[] {
+  const backslashIn = (quote: string, eString: boolean) =>
+    dialect === undefined ? quote === "'" : dialect === 'mysql' ? quote === "'" || quote === '"' : dialect === 'postgres' && eString && quote === "'";
+  const hashComment = dialect === undefined || dialect === 'mysql';
+  const nestedComments = dialect === 'postgres' || dialect === 'h2';
+  /** MySQL /*! … *\/ 안: 표시만 주석으로 두고 안쪽은 코드로 읽는다 */
+  let inExecutable = false;
   const tokens: Token[] = [];
   const n = text.length;
   let i = 0;
@@ -25,10 +42,11 @@ export function tokenize(text: string): Token[] {
   };
 
   /** quote로 닫히는 구간 끝. 같은 따옴표 두 번은 이스케이프 */
-  const closeQuote = (start: number, quote: string): [number, boolean] => {
+  const closeQuote = (start: number, quote: string, eString = false): [number, boolean] => {
+    const escapes = backslashIn(quote, eString);
     let j = start + 1;
     while (j < n) {
-      if (text[j] === '\\' && quote === "'") {
+      if (text[j] === '\\' && escapes) {
         j += 2;
         continue;
       }
@@ -52,23 +70,61 @@ export function tokenize(text: string): Token[] {
       i++;
       continue;
     }
-    if (c === '-' && text[i + 1] === '-') {
+    if (c === '-' && text[i + 1] === '-' && (dialect !== 'mysql' || i + 2 >= n || /[\s\x00-\x1f]/.test(text[i + 2]))) {
       const nl = text.indexOf('\n', i);
       push('comment', start, nl < 0 ? n : nl);
       continue;
     }
-    if (c === '#') {
+    if (c === '/' && text[i + 1] === '/' && dialect === 'h2') {
+      const nl = text.indexOf('\n', i);
+      push('comment', start, nl < 0 ? n : nl);
+      continue;
+    }
+    if (inExecutable && c === '*' && text[i + 1] === '/') {
+      inExecutable = false;
+      push('comment', start, start + 2);
+      continue;
+    }
+    if (c === '#' && hashComment) {
       const nl = text.indexOf('\n', i);
       push('comment', start, nl < 0 ? n : nl);
       continue;
     }
     if (c === '/' && text[i + 1] === '*') {
-      const close = text.indexOf('*/', i + 2);
-      push('comment', start, close < 0 ? n : close + 2, close < 0);
+      if (dialect === 'mysql' && text[i + 2] === '!' && !inExecutable) {
+        // 실행 주석: /*! 와 버전 숫자(5 · 6자리)만 표시로 두고, 안쪽은 코드
+        const m = /^\/\*!(\d{6}(?=\s|\*\/)|\d{5})?/.exec(text.slice(i))!;
+        inExecutable = true;
+        push('comment', start, start + m[0].length);
+        continue;
+      }
+      let depth = 1;
+      let j = i + 2;
+      while (j < n && depth > 0) {
+        if (nestedComments && text[j] === '/' && text[j + 1] === '*') {
+          depth++;
+          j += 2;
+        } else if (text[j] === '*' && text[j + 1] === '/') {
+          depth--;
+          j += 2;
+        } else j++;
+      }
+      push('comment', start, depth > 0 ? n : j, depth > 0);
+      continue;
+    }
+    if ((c === 'E' || c === 'e') && text[i + 1] === "'" && dialect === 'postgres' && !/[\w$]/.test(text[i - 1] ?? '')) {
+      const [end, open] = closeQuote(start + 1, "'", true);
+      push('string', start, end, open);
       continue;
     }
     if (c === "'") {
       const [end, open] = closeQuote(start, "'");
+      push('string', start, end, open);
+      continue;
+    }
+    if (c === '"' && dialect === 'mysql') {
+      // MySQL: ANSI_QUOTES가 꺼져 있으면(기본) "…"는 문자열
+      const [end, open] = closeQuote(start, '"');
       push('string', start, end, open);
       continue;
     }
@@ -86,8 +142,9 @@ export function tokenize(text: string): Token[] {
       }
     }
     if (c === '$') {
-      const tag = /^\$([A-Za-z_][\w]*)?\$/.exec(text.slice(i));
-      if (tag) {
+      // 달러 인용: postgres $tag$ · h2 $$ 만. mysql · sqlite에는 없다
+      const tag = dialect === 'mysql' || dialect === 'sqlite' ? null : /^\$([A-Za-z_][\w]*)?\$/.exec(text.slice(i));
+      if (tag && !(dialect === 'h2' && tag[0] !== '$$')) {
         const close = text.indexOf(tag[0], i + tag[0].length);
         push('string', start, close < 0 ? n : close + tag[0].length, close < 0);
         continue;

@@ -1,4 +1,4 @@
-// 번들(out/extension.js, out/webview/grid.js)에 실제로 들어간 패키지의 라이선스 원문을
+// 번들(out/extension.js, out/webview/grid.js, out/webview/connection.js)에 실제로 들어간 패키지의 라이선스 원문을
 // THIRD_PARTY_NOTICES.md로 모은다. 압축된 번들에서는 각 파일 머리의 저작권 표시가 사라지므로
 // MIT 등 라이선스가 요구하는 고지를 이 파일로 대신한다.
 import * as esbuild from 'esbuild';
@@ -6,8 +6,9 @@ import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
 
 const entries = [
-  { entryPoints: ['src/extension.ts'], platform: 'node', external: ['vscode', 'pg-native'] },
+  { entryPoints: ['src/extension.ts'], platform: 'node', external: ['vscode', 'pg-native', 'cpu-features', '*.node'] },
   { entryPoints: ['webview/grid/main.tsx'], platform: 'browser' },
+  { entryPoints: ['webview/connection/main.tsx'], platform: 'browser' },
 ];
 
 /** node_modules/<name>/… 또는 node_modules/@scope/<name>/… 에서 패키지 폴더 */
@@ -24,8 +25,6 @@ for (const opts of entries) {
     if (dir) dirs.add(dir);
   }
 }
-// sql.js의 wasm은 esbuild를 거치지 않고 복사된다(esbuild.mjs).
-dirs.add('node_modules/sql.js');
 
 const MIT_TEMPLATE = (holder) => `MIT License
 
@@ -74,7 +73,7 @@ function licenseText(dir, pkg, license) {
 const packages = [...dirs]
   .map((dir) => {
     const pkg = JSON.parse(readFileSync(path.join(dir, 'package.json'), 'utf8'));
-    const license = typeof pkg.license === 'string' ? pkg.license : pkg.license?.type ?? 'UNKNOWN';
+    const license = typeof pkg.license === 'string' ? pkg.license : pkg.license?.type ?? pkg.licenses?.map?.((l) => l.type).join(' OR ') ?? 'UNKNOWN';
     return {
       name: pkg.name,
       version: pkg.version,
