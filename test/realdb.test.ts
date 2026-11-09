@@ -5,7 +5,7 @@ import { mysqlDriver } from '../src/drivers/mysql';
 import { postgresDriver, usesCopyProtocol } from '../src/drivers/postgres';
 import type { ConnectionConfig, Session } from '../src/drivers/types';
 import { splitStatements } from '../src/language/splitter';
-import { switchSchemaSql } from '../src/core/sessionSql';
+import { isolationSql, switchSchemaSql } from '../src/core/sessionSql';
 import { sqlLiteral } from '../src/shared/exportFormats';
 
 /*
@@ -114,6 +114,35 @@ describe('PostgreSQL (real server)', { skip: !pgAt && 'set BINDB_TEST_PG=host:po
     await queryAll(s, `SET search_path TO ${base}`);
     await queryAll(s, 'DROP FUNCTION public.bindb_ext()');
     await queryAll(s, 'DROP SCHEMA bindb_s');
+  });
+
+  it('isolation level: the session default follows Transaction control', async () => {
+    const x = await postgresDriver.connect(cfgPg(), {});
+    await queryAll(x, isolationSql({ driver: 'postgres', isolation: 'serializable' })!);
+    assert.deepEqual(await queryAll(x, 'SHOW transaction_isolation'), [['serializable']]);
+    await x.close();
+  });
+
+  // DataGrip 자동 수준: 현재 스키마의 객체가 1000개를 넘으면 2단계(소스 코드 없음)
+  it('automatic introspection level drops to 2 above 1000 objects in the current schema', async () => {
+    await queryAll(s, 'DROP SCHEMA IF EXISTS bindb_lvl CASCADE');
+    await queryAll(s, 'CREATE SCHEMA bindb_lvl');
+    await queryAll(s, "DO $$ BEGIN FOR i IN 1..1000 LOOP EXECUTE format('CREATE TABLE bindb_lvl.t%s (id int PRIMARY KEY)', i); END LOOP; END $$");
+    await queryAll(s, 'CREATE VIEW bindb_lvl.v AS SELECT 1 AS x');
+    const cfg = { id: 't', name: 't', driver: 'postgres', schemaPattern: undefined } as ConnectionConfig;
+    const level = async () => {
+      const meta = (await postgresDriver.introspect(s, cfg)).filter((m) => m.schema === 'bindb_lvl');
+      const v = meta.find((m) => m.name === 'v')!;
+      return { n: meta.length, level: v.level, def: !!v.definition, pk: meta.find((m) => m.name === 't1')?.primaryKey };
+    };
+    // bindb_lvl은 현재 스키마가 아니다 → 3000개 이하면 2단계
+    assert.deepEqual(await level(), { n: 1001, level: 2, def: false, pk: ['id'] });
+    // 스키마마다 지정하면 그 값
+    const meta3 = (await postgresDriver.introspect(s, { ...cfg, schemaLevels: { bindb_lvl: 3 } })).find((m) => m.schema === 'bindb_lvl' && m.name === 'v')!;
+    assert.deepEqual([meta3.level, !!meta3.definition], [3, true]);
+    const meta1 = (await postgresDriver.introspect(s, { ...cfg, schemaLevels: { bindb_lvl: 1 } })).find((m) => m.schema === 'bindb_lvl' && m.name === 't1')!;
+    assert.deepEqual([meta1.level, meta1.columns, meta1.primaryKey], [1, [{ name: 'id', type: undefined }], undefined]);
+    await queryAll(s, 'DROP SCHEMA bindb_lvl CASCADE');
   });
 
   // 배열 · point가 JS 배열 · 객체로 바뀌어 JSON으로 보였고, 그 셀을 저장하면 malformed array literal로 실패했다
@@ -233,6 +262,12 @@ describe('MySQL (real server)', { skip: !myAt && 'set BINDB_TEST_MYSQL=host:port
       assert.deepEqual(await queryAll(s, `SELECT ${lit}`), [[value]], mode || 'default');
     }
     await queryAll(s, `SET SESSION sql_mode = DEFAULT`);
+  });
+
+  it('isolation level: the session default follows Transaction control', async () => {
+    await queryAll(s, isolationSql({ driver: 'mysql', isolation: 'readCommitted' })!);
+    assert.deepEqual(await queryAll(s, 'SELECT @@transaction_isolation'), [['READ-COMMITTED']]);
+    await queryAll(s, 'SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ');
   });
 
   it('plain statements are unchanged', async () => {

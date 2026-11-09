@@ -1,6 +1,38 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 — 2026-11-09
+
+Not published to marketplaces (BindB stays private until 1.0.0). Two changes need action after updating:
+**passwords of project-scoped connections must be entered once more**, and **remote H2 connections that
+pointed at an H2 PostgreSQL server (port 5435) must be changed to its TCP server (port 9092)**.
+
+### Changed — closer to DataGrip's Data Sources options
+
+- **Introspection level is automatic by default**, as in DataGrip: the current schema gets level 3 up to
+  1000 objects (2 up to 3000, otherwise 1), other schemas level 2 up to 3000, system schemas level 2 up to
+  100. The data source's Default level still overrides it, and **each schema can have its own level**
+  (right-click a schema or connection → Introspection Level…; the explorer shows `L1`–`L3`). Level 1 now
+  reads column names without types, as DataGrip does, instead of no columns at all. _Data sources without a
+  Default level used level 3 everywhere; other schemas now get level 2 (no view definitions)._
+- **Session templates override** the data source as DataGrip's do: Authentication, User, Read-only (on,
+  off or inherit — a template can now turn read-only off), Startup script (replaces the data source's
+  instead of being appended) and, for H2, the driver file. Grid edits and the AI write tool honour a
+  template's read-only.
+- **Transaction isolation level** (Options → Transaction control): Read uncommitted, Read committed,
+  Repeatable read or Serializable for PostgreSQL, MySQL and H2.
+- **Keep-alive query** can be changed (default `SELECT 1`); it must be one read-only statement.
+- **Copy from** copies SSH settings only, like DataGrip.
+- **Create database** for H2 Embedded creates the file when it does not exist.
+- **Introspect using JDBC metadata** for H2 (Advanced); used automatically for H2 1.x, whose
+  `INFORMATION_SCHEMA` reports column types as JDBC numbers.
+- The password **Save** selector explains where passwords are kept (VS Code has no separate IDE password
+  settings).
+
+### Fixed
+
+- A read-only H2 data source failed to connect when it had a time zone or a startup script (`SET …` was
+  refused as a write).
+
 
 ### Fixed — found by edge-case testing on real PostgreSQL 16 and MySQL servers
 

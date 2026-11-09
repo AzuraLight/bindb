@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import { resolvePath, resolveTarget } from './common';
 import { BufferedCursor, emptyCursor, queryAll } from './cursor';
 import type { Request, Response } from './sqliteHost';
+import { levelsBySchema } from './introspection';
 import type { Driver, MetaTable, QueryCursor, Session } from './types';
 
 /*
@@ -204,23 +205,25 @@ export const sqliteDriver: Driver = {
       session,
       `SELECT name, type FROM sqlite_master WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' ORDER BY name`,
     );
+    // main은 늘 현재 스키마. 1단계: 열 이름만(타입 · 기본키 없음)
+    const level = levelsBySchema(cfg, objects.map(() => 'main'), 'main', () => false).get('main') ?? 3;
     const out: MetaTable[] = [];
     for (const [name, type] of objects) {
-      // Default level 1: 이름만
-      const cols = (cfg.introspectionLevel ?? 3) === 1 ? [] : await queryAll(
-        session,
-        `SELECT name, type, pk FROM pragma_table_info('${String(name).replace(/'/g, "''")}')`,
-      );
+      const cols = await queryAll(session, `SELECT name, type, pk FROM pragma_table_info('${String(name).replace(/'/g, "''")}')`);
       out.push({
         schema: 'main',
         name: String(name),
         kind: type === 'view' ? 'view' : 'table',
-        columns: cols.map(([n, t]) => ({ name: String(n), type: t ? String(t) : undefined })),
+        level,
+        columns: cols.map(([n, t]) => ({ name: String(n), type: level > 1 && t ? String(t) : undefined })),
         // pk: 기본키 안의 순서(1부터), 0이면 기본키가 아니다
-        primaryKey: cols
-          .filter(([, , pk]) => Number(pk) > 0)
-          .sort(([, , a], [, , b]) => Number(a) - Number(b))
-          .map(([n]) => String(n)),
+        primaryKey:
+          level > 1
+            ? cols
+                .filter(([, , pk]) => Number(pk) > 0)
+                .sort(([, , a], [, , b]) => Number(a) - Number(b))
+                .map(([n]) => String(n))
+            : [],
       });
     }
     return out;

@@ -1,4 +1,4 @@
-import type { ConnectionConfig } from '../drivers/types';
+import type { ConnectionConfig, IsolationLevel } from '../drivers/types';
 import { drivers } from '../drivers';
 import { tokenize } from '../language/tokenizer';
 
@@ -67,4 +67,24 @@ function splitSearchPath(value: string): string[] {
   }
   if (cur.trim()) out.push(cur.trim());
   return out;
+}
+
+const ISOLATION_SQL: Record<IsolationLevel, string> = {
+  readUncommitted: 'READ UNCOMMITTED',
+  readCommitted: 'READ COMMITTED',
+  repeatableRead: 'REPEATABLE READ',
+  serializable: 'SERIALIZABLE',
+};
+
+/**
+ * Transaction control · 격리 수준을 세션 기본값으로 거는 문장.
+ *  - postgres: SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL … (https://www.postgresql.org/docs/current/sql-set-transaction.html)
+ *  - mysql: SET SESSION TRANSACTION ISOLATION LEVEL … (https://dev.mysql.com/doc/refman/8.0/en/set-transaction.html)
+ *  - h2는 JDBC setTransactionIsolation으로(H2 1.4 · 2.x 모두), sqlite는 고를 수 없다
+ */
+export function isolationSql(cfg: Pick<ConnectionConfig, 'driver' | 'isolation'>): string | undefined {
+  if (!cfg.isolation) return undefined;
+  if (cfg.driver === 'postgres') return `SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL ${ISOLATION_SQL[cfg.isolation]}`;
+  if (cfg.driver === 'mysql') return `SET SESSION TRANSACTION ISOLATION LEVEL ${ISOLATION_SQL[cfg.isolation]}`;
+  return undefined;
 }

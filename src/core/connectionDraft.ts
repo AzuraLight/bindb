@@ -1,4 +1,5 @@
-import type { AuthMode, ConnectionConfig, DriverId, PasswordSave, SslMode } from '../drivers/types';
+import type { AuthMode, ConnectionConfig, DriverId, IsolationLevel, PasswordSave, SslMode } from '../drivers/types';
+import { classifySql } from './classify';
 
 /**
  * 연결 폼의 입력값 ↔ ConnectionConfig. vscode나 드라이버에 기대지 않아 테스트에서 바로 쓴다.
@@ -32,10 +33,15 @@ export interface AdvancedForm {
   scope: 'global' | 'project';
 
   transactionControl: 'auto' | 'manual';
+  /** '' = DB 기본값 */
+  isolation: '' | IsolationLevel;
   switchSchema: 'automatic' | 'manual' | 'disable';
   timeZone: string;
+  /** General · Create database (H2 Embedded) */
+  createDatabase: boolean;
   keepAliveOn: boolean;
   keepAlive: string;
+  keepAliveQuery: string;
   autoDisconnectOn: boolean;
   autoDisconnect: string;
   singleDatabase: boolean;
@@ -47,7 +53,10 @@ export interface AdvancedForm {
   introspectOn: boolean;
   introspectInterval: string;
   trackSchemas: boolean;
-  introspectionLevel: '1' | '2' | '3';
+  /** '' = 자동(스키마의 객체 수로) */
+  introspectionLevel: '' | '1' | '2' | '3';
+  /** 탐색기에서 스키마마다 지정한 수준(패널에서는 고치지 않고 그대로 저장한다) */
+  schemaLevels: Record<string, 1 | 2 | 3>;
   preIntrospected: boolean;
   virtualObjectsFile: string;
 
@@ -76,7 +85,8 @@ export interface AdvancedForm {
   showSystemSchemas: boolean;
   showTemplateDatabases: boolean;
 
-  sessionTemplates: { name: string; user: string; readOnly: boolean; startupScript: string }[];
+  /** readOnly: '' = 데이터 소스 값, on · off = 덮어씀. auth: '' = 데이터 소스 값 */
+  sessionTemplates: { name: string; auth: '' | AuthMode; user: string; readOnly: '' | 'on' | 'off'; startupScript: string; driverFile: string }[];
   useSessionTemplate: string;
   /** 줄마다 작업 이름 하나 */
   beforeConnection: string;
@@ -95,6 +105,8 @@ export interface AdvancedForm {
   vmOptions: string;
   vmEnvironment: string;
   workingDirectory: string;
+  /** Introspect using JDBC metadata(H2) */
+  introspectJdbc: boolean;
 }
 
 export function emptyAdvanced(): AdvancedForm {
@@ -105,10 +117,13 @@ export function emptyAdvanced(): AdvancedForm {
     passwordSave: 'forever',
     scope: 'global',
     transactionControl: 'auto',
+    isolation: '',
     switchSchema: 'manual',
     timeZone: '',
+    createDatabase: false,
     keepAliveOn: false,
     keepAlive: '60',
+    keepAliveQuery: '',
     autoDisconnectOn: false,
     autoDisconnect: '300',
     singleDatabase: false,
@@ -119,7 +134,8 @@ export function emptyAdvanced(): AdvancedForm {
     introspectOn: false,
     introspectInterval: '10',
     trackSchemas: true,
-    introspectionLevel: '3',
+    introspectionLevel: '',
+    schemaLevels: {},
     preIntrospected: true,
     virtualObjectsFile: '',
     sslCaFile: '',
@@ -156,6 +172,7 @@ export function emptyAdvanced(): AdvancedForm {
     vmOptions: '',
     vmEnvironment: '',
     workingDirectory: '',
+    introspectJdbc: false,
   };
 }
 
@@ -170,10 +187,13 @@ function advancedFromConfig(cfg: ConnectionConfig): AdvancedForm {
     passwordSave: cfg.passwordSave ?? 'forever',
     scope: cfg.scope ?? 'global',
     transactionControl: cfg.transactionControl ?? 'auto',
+    isolation: cfg.isolation ?? '',
     switchSchema: cfg.switchSchema ?? 'manual',
     timeZone: cfg.timeZone ?? '',
+    createDatabase: !!cfg.createDatabase,
     keepAliveOn: cfg.keepAlive !== undefined,
     keepAlive: str(cfg.keepAlive, a.keepAlive),
+    keepAliveQuery: cfg.keepAliveQuery ?? '',
     autoDisconnectOn: cfg.autoDisconnect !== undefined,
     autoDisconnect: str(cfg.autoDisconnect, a.autoDisconnect),
     singleDatabase: !!cfg.singleDatabase,
@@ -184,7 +204,8 @@ function advancedFromConfig(cfg: ConnectionConfig): AdvancedForm {
     introspectOn: cfg.introspectInterval !== undefined,
     introspectInterval: str(cfg.introspectInterval, a.introspectInterval),
     trackSchemas: cfg.trackSchemas ?? true,
-    introspectionLevel: String(cfg.introspectionLevel ?? 3) as AdvancedForm['introspectionLevel'],
+    introspectionLevel: (cfg.introspectionLevel ? String(cfg.introspectionLevel) : '') as AdvancedForm['introspectionLevel'],
+    schemaLevels: { ...(cfg.schemaLevels ?? {}) },
     preIntrospected: cfg.preIntrospected ?? true,
     virtualObjectsFile: cfg.virtualObjectsFile ?? '',
     sslCaFile: cfg.sslCaFile ?? '',
@@ -207,7 +228,14 @@ function advancedFromConfig(cfg: ConnectionConfig): AdvancedForm {
     objectFilter: cfg.objectFilter ?? '',
     showSystemSchemas: !!cfg.showSystemSchemas,
     showTemplateDatabases: !!cfg.showTemplateDatabases,
-    sessionTemplates: (cfg.sessionTemplates ?? []).map((t) => ({ name: t.name, user: t.user ?? '', readOnly: !!t.readOnly, startupScript: t.startupScript ?? '' })),
+    sessionTemplates: (cfg.sessionTemplates ?? []).map((t) => ({
+      name: t.name,
+      auth: t.auth ?? '',
+      user: t.user ?? '',
+      readOnly: t.readOnly === undefined ? '' : t.readOnly ? 'on' : 'off',
+      startupScript: t.startupScript ?? '',
+      driverFile: t.driverFile ?? '',
+    })),
     useSessionTemplate: cfg.useSessionTemplate ?? '',
     beforeConnection: (cfg.beforeConnection ?? []).join('\n'),
     keywordCase: cfg.codeStyle?.keywordCase ?? 'upper',
@@ -221,6 +249,7 @@ function advancedFromConfig(cfg: ConnectionConfig): AdvancedForm {
     vmOptions: cfg.vmOptions ?? '',
     vmEnvironment: cfg.vmEnvironment ?? '',
     workingDirectory: cfg.workingDirectory ?? '',
+    introspectJdbc: !!cfg.introspectJdbc,
   };
 }
 
@@ -473,12 +502,20 @@ function buildAdvanced(form: ConnectionForm, config: Omit<ConnectionConfig, 'id'
   if (form.driver !== 'sqlite' || a.transactionControl === 'manual') {
     if (a.transactionControl === 'manual') config.transactionControl = 'manual';
   }
+  // SQLite는 격리 수준을 고를 수 없다(늘 SERIALIZABLE)
+  if (a.isolation && form.driver !== 'sqlite') config.isolation = a.isolation;
+  if (a.createDatabase && form.driver === 'h2' && config.file) config.createDatabase = true;
   if (a.switchSchema !== 'manual') config.switchSchema = a.switchSchema;
   if (a.timeZone.trim()) config.timeZone = a.timeZone.trim();
   if (a.keepAliveOn) {
     const n = int(a.keepAlive, 1, 86400);
     if (n === undefined) errors.keepAlive = 'Keep-alive must be 1–86400 seconds.';
     else config.keepAlive = n;
+  }
+  // keep-alive 쿼리는 읽기 전용 연결에서도 주기적으로 돈다 — 읽기 문장 하나만
+  if (a.keepAliveQuery.trim()) {
+    if (classifySql(a.keepAliveQuery, form.driver).kind !== 'read') errors.keepAliveQuery = 'The keep-alive query must be one read-only statement.';
+    else config.keepAliveQuery = a.keepAliveQuery.trim();
   }
   if (a.autoDisconnectOn) {
     const n = int(a.autoDisconnect, 1, 86400);
@@ -499,7 +536,8 @@ function buildAdvanced(form: ConnectionForm, config: Omit<ConnectionConfig, 'id'
   if (!a.trackSchemas) config.trackSchemas = false;
   if (!a.preIntrospected) config.preIntrospected = false;
   if (a.virtualObjectsFile.trim()) config.virtualObjectsFile = a.virtualObjectsFile.trim();
-  if (a.introspectionLevel !== '3') config.introspectionLevel = Number(a.introspectionLevel) as 1 | 2;
+  if (a.introspectionLevel) config.introspectionLevel = Number(a.introspectionLevel) as 1 | 2 | 3;
+  if (Object.keys(a.schemaLevels).length) config.schemaLevels = { ...a.schemaLevels };
 
   if (config.ssl) {
     if (!a.sslTrustBundled || !a.sslTrustSystem) config.sslTruststore = { bundled: a.sslTrustBundled, system: a.sslTrustSystem };
@@ -559,14 +597,17 @@ function buildAdvanced(form: ConnectionForm, config: Omit<ConnectionConfig, 'id'
     config.vmEnvironment = a.vmEnvironment.trim();
   }
   if (a.workingDirectory.trim()) config.workingDirectory = a.workingDirectory.trim();
+  if (a.introspectJdbc && form.driver === 'h2') config.introspectJdbc = true;
 
   const templates = a.sessionTemplates.filter((t) => t.name.trim());
   if (templates.length) {
     config.sessionTemplates = templates.map((t) => ({
       name: t.name.trim(),
+      ...(t.auth ? { auth: t.auth } : {}),
       ...(t.user.trim() ? { user: t.user.trim() } : {}),
-      ...(t.readOnly ? { readOnly: true } : {}),
+      ...(t.readOnly ? { readOnly: t.readOnly === 'on' } : {}),
       ...(t.startupScript.trim() ? { startupScript: t.startupScript } : {}),
+      ...(t.driverFile.trim() ? { driverFile: t.driverFile.trim() } : {}),
     }));
   }
   if (a.useSessionTemplate) {
@@ -586,11 +627,14 @@ function buildAdvanced(form: ConnectionForm, config: Omit<ConnectionConfig, 'id'
 export function withSessionTemplate(cfg: ConnectionConfig): ConnectionConfig {
   const t = cfg.useSessionTemplate ? cfg.sessionTemplates?.find((x) => x.name === cfg.useSessionTemplate) : undefined;
   if (!t) return cfg;
+  // 템플릿에 값이 있는 칸만 덮어쓴다(DataGrip: 템플릿 설정이 데이터 소스 설정을 덮어쓴다)
   return {
     ...cfg,
+    ...(t.auth ? { auth: t.auth } : {}),
     ...(t.user ? { user: t.user } : {}),
-    ...(t.readOnly !== undefined ? { readOnly: t.readOnly || cfg.readOnly } : {}),
-    startupScript: [cfg.startupScript, t.startupScript].filter((x) => x?.trim()).join(';\n') || undefined,
+    ...(t.readOnly !== undefined ? { readOnly: t.readOnly } : {}),
+    ...(t.startupScript?.trim() ? { startupScript: t.startupScript } : {}),
+    ...(t.driverFile ? { driverFile: t.driverFile } : {}),
   };
 }
 

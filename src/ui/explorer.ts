@@ -75,7 +75,10 @@ export class ExplorerProvider implements vscode.TreeDataProvider<Node>, vscode.D
       case 'schema': {
         const item = new vscode.TreeItem(node.schema, vscode.TreeItemCollapsibleState.Collapsed);
         item.id = `schema:${node.cfg.id}:${node.database ?? ''}:${node.schema}`;
-        item.description = `${node.tables.length}`;
+        // 객체 수 · 읽은 수준(Introspection Level). 1단계면 열 타입이 없다
+        const level = node.tables[0]?.level;
+        item.description = level ? `${node.tables.length} · L${level}` : `${node.tables.length}`;
+        item.tooltip = level ? `Introspection level ${level}${node.cfg.schemaLevels?.[node.schema] ? ' (set for this schema)' : node.cfg.introspectionLevel ? '' : ' (auto)'}` : undefined;
         item.iconPath = new vscode.ThemeIcon('symbol-namespace');
         item.contextValue = 'schema';
         return item;

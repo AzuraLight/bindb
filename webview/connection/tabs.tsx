@@ -35,7 +35,7 @@ export function tabOf(field: string): Tab {
   if (/^(ssh|ssl)/.test(field)) return 'sshssl';
   if (/^(schemaPattern|objectFilter)$/.test(field)) return 'schemas';
   if (/^(vm|workingDirectory|driverOptions)/.test(field)) return 'advanced';
-  if (/^(keepAlive|autoDisconnect|introspectInterval|connectTimeout|timeZone|startupScript)$/.test(field)) return 'options';
+  if (/^(keepAlive|keepAliveQuery|autoDisconnect|introspectInterval|connectTimeout|timeZone|startupScript|isolation)$/.test(field)) return 'options';
   return 'general';
 }
 
@@ -167,6 +167,14 @@ export function GeneralTab(p: EditorProps) {
             </div>
           </Row>
         )}
+        {!urlOnly && f.file && form.driver === 'h2' && (
+          <Row label="" htmlFor="f-create" hint="Adds an argument to the URL to create the database when the file does not exist (as DataGrip's Create database). Without it, a missing file is an error.">
+            <label className="check">
+              <input id="f-create" type="checkbox" checked={a.createDatabase} onChange={(e) => setA('createDatabase', e.target.checked)} />
+              Create database
+            </label>
+          </Row>
+        )}
 
         {form.driver === 'h2' && (
           <Row label="H2 jar" htmlFor="f-jar" hint="H2 JDBC driver file, shared by all H2 data sources. BindB runs it in a Java process started only while connected (Java 11+ on PATH or JAVA_HOME).">
@@ -210,12 +218,14 @@ export function GeneralTab(p: EditorProps) {
                   <label className="pair-label" htmlFor="f-save">
                     Save:
                   </label>
-                  <Select id="f-save" value={a.passwordSave} onChange={(e) => setA('passwordSave', e.target.value as AdvancedForm['passwordSave'])}>
-                    <option value="never">Never</option>
-                    <option value="restart">Until restart</option>
-                    <option value="session">For session</option>
-                    <option value="forever">Forever</option>
-                  </Select>
+                  <span title="Where passwords are kept (DataGrip's IDE password settings): Forever = the operating system keychain through VS Code SecretStorage; Until restart / For session = memory only; Never = asked on every connection.">
+                    <Select id="f-save" value={a.passwordSave} onChange={(e) => setA('passwordSave', e.target.value as AdvancedForm['passwordSave'])}>
+                      <option value="never">Never</option>
+                      <option value="restart">Until restart</option>
+                      <option value="session">For session</option>
+                      <option value="forever">Forever</option>
+                    </Select>
+                  </span>
                 </div>
                 {p.has.password && (
                   <label className="check small">
@@ -309,6 +319,19 @@ export function OptionsTab(p: EditorProps) {
             <option value="manual">Manual</option>
           </Select>
 
+          {form.driver !== 'sqlite' && (
+            <>
+              <label htmlFor="o-iso">Isolation level:</label>
+              <Select id="o-iso" className="short" value={a.isolation} onChange={(e) => setA('isolation', e.target.value as AdvancedForm['isolation'])}>
+                <option value="">Database default</option>
+                <option value="readUncommitted">Read uncommitted</option>
+                <option value="readCommitted">Read committed</option>
+                <option value="repeatableRead">Repeatable read</option>
+                <option value="serializable">Serializable</option>
+              </Select>
+            </>
+          )}
+
           <label htmlFor="o-switch">Switch schema:</label>
           <Select id="o-switch" className="short" value={a.switchSchema} onChange={(e) => setA('switchSchema', e.target.value as AdvancedForm['switchSchema'])}>
             <option value="automatic">Automatic</option>
@@ -339,6 +362,13 @@ export function OptionsTab(p: EditorProps) {
         </div>
 
         <Toggle label="Run keep-alive query each" on={a.keepAliveOn} setOn={(v) => setA('keepAliveOn', v)} value={a.keepAlive} setValue={(v) => setA('keepAlive', v)} unit="sec." error={errors.keepAlive} />
+        {a.keepAliveOn && (
+          <div className="inline-row indent-check">
+            <label htmlFor="o-kaq">Keep-alive query:</label>
+            <input id="o-kaq" className={errors.keepAliveQuery ? 'bad' : ''} spellCheck={false} value={a.keepAliveQuery} placeholder="SELECT 1" onChange={(e) => setA('keepAliveQuery', e.target.value)} />
+            {errors.keepAliveQuery && <div className="error">{errors.keepAliveQuery}</div>}
+          </div>
+        )}
         <Toggle label="Auto-disconnect after" on={a.autoDisconnectOn} setOn={(v) => setA('autoDisconnectOn', v)} value={a.autoDisconnect} setValue={(v) => setA('autoDisconnect', v)} unit="sec." error={errors.autoDisconnect} />
         {f.timeout && (
           <div className="inline-row indent-check">
@@ -383,6 +413,7 @@ export function OptionsTab(p: EditorProps) {
         <div className="opt-grid">
           <label htmlFor="o-level">Default level:</label>
           <Select id="o-level" className="mid" value={a.introspectionLevel} onChange={(e) => setA('introspectionLevel', e.target.value as AdvancedForm['introspectionLevel'])}>
+            <option value="">Auto — by schema size</option>
             <option value="1">Level 1 — names only</option>
             <option value="2">Level 2 — everything except source code</option>
             <option value="3">Level 3 — everything</option>
@@ -450,9 +481,11 @@ export function OptionsTab(p: EditorProps) {
           <thead>
             <tr>
               <th>Name</th>
+              <th>Authentication</th>
               <th>User</th>
               <th>Read-only</th>
               <th>Startup script</th>
+              {form.driver === 'h2' && <th>Driver file</th>}
               <th />
             </tr>
           </thead>
@@ -466,14 +499,31 @@ export function OptionsTab(p: EditorProps) {
                     <input aria-label="Template name" value={t.name} onChange={(e) => setT({ name: e.target.value })} />
                   </td>
                   <td>
-                    <input aria-label="Template user" value={t.user} onChange={(e) => setT({ user: e.target.value })} />
-                  </td>
-                  <td className="center">
-                    <input type="checkbox" aria-label="Template read-only" checked={t.readOnly} onChange={(e) => setT({ readOnly: e.target.checked })} />
+                    <Select aria-label="Template authentication" value={t.auth} onChange={(e) => setT({ auth: e.target.value as typeof t.auth })}>
+                      <option value="">Data source</option>
+                      <option value="password">User &amp; Password</option>
+                      <option value="none">No auth</option>
+                      {form.driver === 'postgres' && <option value="pgpass">pgpass</option>}
+                    </Select>
                   </td>
                   <td>
-                    <input aria-label="Template startup script" spellCheck={false} value={t.startupScript} onChange={(e) => setT({ startupScript: e.target.value })} />
+                    <input aria-label="Template user" value={t.user} placeholder="Data source" onChange={(e) => setT({ user: e.target.value })} />
                   </td>
+                  <td>
+                    <Select aria-label="Template read-only" value={t.readOnly} onChange={(e) => setT({ readOnly: e.target.value as typeof t.readOnly })}>
+                      <option value="">Data source</option>
+                      <option value="on">On</option>
+                      <option value="off">Off</option>
+                    </Select>
+                  </td>
+                  <td>
+                    <input aria-label="Template startup script" spellCheck={false} value={t.startupScript} placeholder="Data source" onChange={(e) => setT({ startupScript: e.target.value })} />
+                  </td>
+                  {form.driver === 'h2' && (
+                    <td>
+                      <input aria-label="Template driver file" value={t.driverFile} placeholder="Data source" onChange={(e) => setT({ driverFile: e.target.value })} />
+                    </td>
+                  )}
                   <td>
                     <button className="dots" title="Remove template" onClick={() => setA('sessionTemplates', a.sessionTemplates.filter((_, j) => j !== i))}>
                       −
@@ -484,7 +534,7 @@ export function OptionsTab(p: EditorProps) {
             })}
           </tbody>
         </table>
-        <button className="text-button" onClick={() => setA('sessionTemplates', [...a.sessionTemplates, { name: `Template ${a.sessionTemplates.length + 1}`, user: '', readOnly: false, startupScript: '' }])}>
+        <button className="text-button" onClick={() => setA('sessionTemplates', [...a.sessionTemplates, { name: `Template ${a.sessionTemplates.length + 1}`, auth: '', user: '', readOnly: '', startupScript: '', driverFile: '' }])}>
           + Add template
         </button>
       </Section>
@@ -581,7 +631,7 @@ export function SshSslTab(p: EditorProps) {
         {p.copySources.length > 0 && (
           <Select
             className="short"
-            aria-label="Copy SSH/SSL settings from"
+            aria-label="Copy SSH settings from"
             value=""
             onChange={(e) => {
               if (e.target.value) p.copyFrom(e.target.value);
@@ -890,12 +940,25 @@ export function AdvancedTab(p: EditorProps) {
         </tbody>
       </table>
       <p className="note">
-        Passed to the {form.driver === 'mysql' ? 'mysql2' : form.driver === 'sqlite' ? 'SQLite' : 'pg'} client as connection options
-        {form.driver === 'postgres' ? ' (for example application_name, statement_timeout, options).' : '.'}
+        {form.driver === 'h2' ? (
+          <>Added to the H2 JDBC URL as ;NAME=VALUE (for example AUTO_SERVER=TRUE, MODE=PostgreSQL).</>
+        ) : (
+          <>
+            Passed to the {form.driver === 'mysql' ? 'mysql2' : form.driver === 'sqlite' ? 'SQLite' : 'pg'} client as connection options
+            {form.driver === 'postgres' ? ' (for example application_name, statement_timeout, options).' : '.'}
+          </>
+        )}
       </p>
+      {jvm && (
+        <label className="check">
+          <input type="checkbox" checked={a.introspectJdbc} onChange={(e) => setA('introspectJdbc', e.target.checked)} />
+          Introspect using JDBC metadata
+          <span className="hint"> — read tables and columns with JDBC DatabaseMetaData instead of INFORMATION_SCHEMA (always used for H2 1.x)</span>
+        </label>
+      )}
 
       <div className="grid adv-grid">
-        <Row label="VM options" htmlFor="a-vm" hint={jvm ? 'Arguments for the java process that runs the H2 server (Embedded).' : 'Used by H2 Embedded only.'}>
+        <Row label="VM options" htmlFor="a-vm" hint={jvm ? 'Arguments for the Java process that runs the H2 JDBC driver.' : 'Used by H2 only.'}>
           <input id="a-vm" disabled={!jvm} spellCheck={false} value={a.vmOptions} onChange={(e) => setA('vmOptions', e.target.value)} />
         </Row>
         <Row label="VM environment" htmlFor="a-env" error={errors.vmEnvironment} hint="KEY=VALUE, one per line.">

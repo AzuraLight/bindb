@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { isLocalRequest } from '../src/ai/mcpServer';
-import { parseUrl, toUrl, emptyForm } from '../src/core/connectionDraft';
+import { buildConfig, emptyForm, formFromConfig, parseUrl, toUrl } from '../src/core/connectionDraft';
 import { buildFilteredSql } from '../src/core/gridQuery';
 import { secretKey, workspaceKey } from '../src/core/secretKeys';
-import { cannotRunInTransaction, switchSchemaSql } from '../src/core/sessionSql';
+import { cannotRunInTransaction, isolationSql, switchSchemaSql } from '../src/core/sessionSql';
 import { effectiveSslMode, isSslUnsupported, tlsOptions } from '../src/drivers/common';
 import { h2FileProblem } from '../src/drivers/h2';
 import type { ConnectionConfig } from '../src/drivers/types';
@@ -71,6 +71,33 @@ describe('#11 manual transactions: statements that cannot run inside BEGIN', () 
     }
     assert.ok(cannotRunInTransaction('VACUUM', 'sqlite'));
     assert.ok(!cannotRunInTransaction('CREATE DATABASE d', 'sqlite'));
+  });
+});
+
+describe('4th priority: DataGrip parity', () => {
+  it('isolation statements per driver; none for SQLite and H2 (JDBC)', () => {
+    assert.equal(isolationSql({ driver: 'postgres', isolation: 'repeatableRead' }), 'SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL REPEATABLE READ');
+    assert.equal(isolationSql({ driver: 'mysql', isolation: 'readUncommitted' }), 'SET SESSION TRANSACTION ISOLATION LEVEL READ UNCOMMITTED');
+    assert.equal(isolationSql({ driver: 'sqlite', isolation: 'serializable' }), undefined);
+    assert.equal(isolationSql({ driver: 'h2', isolation: 'serializable' }), undefined);
+    assert.equal(isolationSql({ driver: 'postgres' }), undefined);
+  });
+
+  it('keep-alive query must be one read-only statement; isolation and Create database round-trip', () => {
+    const base = emptyForm('postgres');
+    const withA = (adv: object, driver: 'postgres' | 'h2' = 'postgres') => buildConfig({ ...emptyForm(driver), name: 'x', host: 'h', file: driver === 'h2' ? '/d/x.mv.db' : '', h2Mode: driver === 'h2' ? 'file' : base.h2Mode, adv: { ...emptyForm(driver).adv, ...adv } }, []);
+    const bad = withA({ keepAliveOn: true, keepAliveQuery: 'DELETE FROM t' });
+    assert.deepEqual(bad.ok ? 'ok' : Object.keys(bad.errors), ['keepAliveQuery']);
+    const ok = withA({ keepAliveOn: true, keepAliveQuery: 'SELECT 42', isolation: 'serializable' });
+    assert.ok(ok.ok && ok.config.keepAliveQuery === 'SELECT 42' && ok.config.isolation === 'serializable');
+    const h2 = withA({ createDatabase: true, introspectJdbc: true }, 'h2');
+    assert.ok(h2.ok && h2.config.createDatabase === true && h2.config.introspectJdbc === true);
+    // 패널에서 저장해도 탐색기에서 정한 스키마별 수준이 남는다
+    assert.deepEqual(formFromConfig({ id: '1', name: 'x', driver: 'postgres', host: 'h', schemaLevels: { big: 1 } }).adv.schemaLevels, { big: 1 });
+    const kept = buildConfig(formFromConfig({ id: '1', name: 'x', driver: 'postgres', host: 'h', schemaLevels: { big: 1 } }), []);
+    assert.ok(kept.ok && kept.config.schemaLevels?.big === 1);
+    // 예전에 Default level을 비워 둔 연결은 자동
+    assert.equal(formFromConfig({ id: '1', name: 'x', driver: 'postgres', host: 'h' }).adv.introspectionLevel, '');
   });
 });
 

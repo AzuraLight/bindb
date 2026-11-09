@@ -8,6 +8,7 @@ import type { ConnectionStore } from '../core/connections';
 import type { SessionManager } from '../core/sessions';
 import { pickConnection } from '../ui/binding';
 import { errorText } from '../ui/explorer';
+import bindbPkg from '../../package.json';
 import { BindbMcpServer, newToken, schemaMarkdown } from './mcpServer';
 
 /*
@@ -78,7 +79,7 @@ export class AiIntegration implements vscode.Disposable {
         onDidChangeMcpServerDefinitions: this.changed.event,
         provideMcpServerDefinitions: async () => {
           if (!this.enabled) return [];
-          return [new vscode.McpHttpServerDefinition('BindB', vscode.Uri.parse(this.url), { Authorization: `Bearer ${await this.token()}` }, '0.2.0')];
+          return [new vscode.McpHttpServerDefinition('BindB', vscode.Uri.parse(this.url), { Authorization: `Bearer ${await this.token()}` }, bindbPkg.version)];
         },
         resolveMcpServerDefinition: async (def) => {
           await this.ensureRunning();

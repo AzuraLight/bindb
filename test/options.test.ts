@@ -154,16 +154,28 @@ describe('SQLite with Manual transactions', () => {
 });
 
 describe('Session templates', () => {
-  it('the chosen template overrides user, read-only and adds its startup script', async () => {
+  // DataGrip: "Template settings override general connection settings" — 덧붙이지 않고 덮어쓴다
+  it('the chosen template overrides authentication, user, read-only, startup script and driver', async () => {
     const { withSessionTemplate } = await import('../src/core/connectionDraft');
     const cfg: ConnectionConfig = {
       id: '1', name: 'x', driver: 'postgres', user: 'app', startupScript: 'SET a = 1',
-      sessionTemplates: [{ name: 'report', user: 'reader', readOnly: true, startupScript: 'SET b = 2' }],
+      sessionTemplates: [{ name: 'report', auth: 'pgpass', user: 'reader', readOnly: true, startupScript: 'SET b = 2', driverFile: '/j/h2.jar' }],
       useSessionTemplate: 'report',
     };
     const t = withSessionTemplate(cfg);
-    assert.deepEqual([t.user, t.readOnly, t.startupScript], ['reader', true, 'SET a = 1;\nSET b = 2']);
+    assert.deepEqual([t.auth, t.user, t.readOnly, t.startupScript, t.driverFile], ['pgpass', 'reader', true, 'SET b = 2', '/j/h2.jar']);
     assert.equal(withSessionTemplate({ ...cfg, useSessionTemplate: undefined }).user, 'app');
+  });
+
+  it('a template can turn read-only off, and empty fields keep the data source values', async () => {
+    const { withSessionTemplate } = await import('../src/core/connectionDraft');
+    const cfg: ConnectionConfig = {
+      id: '1', name: 'x', driver: 'postgres', user: 'app', readOnly: true, startupScript: 'SET a = 1',
+      sessionTemplates: [{ name: 'admin', readOnly: false }],
+      useSessionTemplate: 'admin',
+    };
+    const t = withSessionTemplate(cfg);
+    assert.deepEqual([t.readOnly, t.user, t.startupScript, t.auth], [false, 'app', 'SET a = 1', undefined]);
   });
 
   it('validates the template name and round-trips Other options', () => {
@@ -171,7 +183,10 @@ describe('Session templates', () => {
     assert.ok(!bad.ok && bad.errors.useSessionTemplate);
     const r = buildConfig(
       form({}, {
-        sessionTemplates: [{ name: 'report', user: 'reader', readOnly: true, startupScript: '' }],
+        sessionTemplates: [
+          { name: 'report', auth: '', user: 'reader', readOnly: 'on', startupScript: '', driverFile: '' },
+          { name: 'admin', auth: 'none', user: '', readOnly: 'off', startupScript: 'SET x = 1', driverFile: '/j/h2.jar' },
+        ],
         useSessionTemplate: 'report', beforeConnection: 'start db\n\n', keywordCase: 'lower', quoteIdentifiers: 'needed', color: '#ff8800', introspectionLevel: '1',
       }),
       [],
@@ -182,20 +197,43 @@ describe('Session templates', () => {
     assert.deepEqual(c.codeStyle, { keywordCase: 'lower', quoteIdentifiers: 'needed' });
     assert.equal(c.introspectionLevel, 1);
     assert.equal(c.color, '#ff8800');
+    assert.deepEqual(c.sessionTemplates, [
+      { name: 'report', user: 'reader', readOnly: true },
+      { name: 'admin', auth: 'none', readOnly: false, startupScript: 'SET x = 1', driverFile: '/j/h2.jar' },
+    ]);
     assert.deepEqual(buildConfig(formFromConfig({ id: '1', ...c }), []), r);
   });
 });
 
 describe('Introspection level', () => {
-  it('level 1 loads names only', async () => {
+  // DataGrip 1단계: 이름 · 시그니처만(열 타입은 unknown). 예전에는 열을 아예 읽지 않았다
+  it('level 1 loads names only: column names without types or keys', async () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'bindb-lvl-'));
     after(() => rmSync(dir, { recursive: true, force: true }));
     const cfg: ConnectionConfig = { id: 'x', name: 'x', driver: 'sqlite', file: path.join(dir, 'l.db') };
     const s = await sqliteDriver.connect(cfg, {});
-    await (await s.execute('CREATE TABLE t(a, b)')).close();
-    assert.deepEqual((await sqliteDriver.introspect(s, { ...cfg, introspectionLevel: 1 }))[0].columns, []);
-    assert.equal((await sqliteDriver.introspect(s, cfg))[0].columns.length, 2);
-    await s.close();
+    try {
+      await (await s.execute('CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT)')).close();
+      const [l1] = await sqliteDriver.introspect(s, { ...cfg, introspectionLevel: 1 });
+      assert.deepEqual([l1.level, l1.columns, l1.primaryKey], [1, [{ name: 'a', type: undefined }, { name: 'b', type: undefined }], []]);
+      // 자동: 작은 현재 스키마(main)는 3단계
+      const [auto] = await sqliteDriver.introspect(s, cfg);
+      assert.deepEqual([auto.level, auto.columns.map((c) => c.type), auto.primaryKey], [3, ['INTEGER', 'TEXT'], ['a']]);
+      // 스키마마다 지정한 값이 Default level보다 앞선다
+      assert.equal((await sqliteDriver.introspect(s, { ...cfg, introspectionLevel: 3, schemaLevels: { main: 2 } }))[0].level, 2);
+    } finally {
+      await s.close();
+    }
+  });
+
+  it('automatic level follows DataGrip thresholds', async () => {
+    const { schemaLevel } = await import('../src/drivers/introspection');
+    const auto = (n: number, current: boolean, system = false) => schemaLevel({}, 's', n, { current, system });
+    assert.deepEqual([auto(1000, true), auto(1001, true), auto(3000, true), auto(3001, true)], [3, 2, 2, 1]);
+    assert.deepEqual([auto(10, false), auto(3000, false), auto(3001, false)], [2, 2, 1]);
+    assert.deepEqual([auto(100, false, true), auto(101, false, true)], [2, 1]);
+    assert.equal(schemaLevel({ introspectionLevel: 1 }, 's', 5, { current: true, system: false }), 1);
+    assert.equal(schemaLevel({ introspectionLevel: 1, schemaLevels: { s: 3 } }, 's', 5, { current: true, system: false }), 3);
   });
 });
 

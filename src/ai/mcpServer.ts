@@ -1,10 +1,12 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import bindbPkg from '../../package.json';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { z } from 'zod';
 import type { ConnectionStore } from '../core/connections';
 import type { SessionManager } from '../core/sessions';
+import { withSessionTemplate } from '../core/connectionDraft';
 import { drivers, type ConnectionConfig, type MetaTable } from '../drivers';
 
 /*
@@ -47,7 +49,7 @@ function describeConnection(c: ConnectionConfig) {
     driver: drivers[c.driver].label,
     kind: c.kind === 'ddl' ? 'ddl (SQL files)' : 'database',
     database: c.database ?? (c.file ? c.file.split(/[\\/]/).pop() : undefined),
-    readOnly: !!c.readOnly,
+    readOnly: !!withSessionTemplate(c).readOnly,
     comment: c.comment,
   };
 }
@@ -69,7 +71,7 @@ export function schemaMarkdown(cfg: ConnectionConfig, tables: MetaTable[]): stri
 
 /** 요청마다 새로 만드는 MCP 서버(무상태) */
 function buildServer(store: ConnectionStore, sessions: SessionManager, opts: McpOptions): McpServer {
-  const server = new McpServer({ name: 'bindb', version: '0.2.0' });
+  const server = new McpServer({ name: 'bindb', version: bindbPkg.version });
   const find = (name: string) => store.findByName(name);
   const names = () => store.list().map((c) => c.name).join(', ') || '(none)';
 
@@ -163,7 +165,7 @@ function buildServer(store: ConnectionStore, sessions: SessionManager, opts: Mcp
       const cfg = find(connection);
       if (!cfg) return fail(`No connection named "${connection}". Available: ${names()}`);
       if (!opts.allowWrites()) return fail('Writes from AI tools are disabled. The user can enable the setting "bindb.ai.allowWrites".');
-      if (cfg.readOnly) return fail(`${cfg.name} is read-only.`);
+      if (withSessionTemplate(cfg).readOnly) return fail(`${cfg.name} is read-only.`);
       if (!(await opts.confirmWrite(cfg.name, sql))) return fail('The user declined this statement.');
       try {
         const cursor = await sessions.execute(cfg, sql.trim().replace(/;\s*$/, ''), { client: 'ai' });

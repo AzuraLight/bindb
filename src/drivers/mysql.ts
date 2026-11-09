@@ -184,8 +184,12 @@ export const mysqlDriver: Driver = {
     // Single database mode: 연결 설정의 데이터베이스만
     const db = cfg.singleDatabase ? mysqlDriver.defaultSchema(cfg) : undefined;
     if (db) parts.push(`table_schema = '${db.replace(/'/g, "''")}'`);
-    return introspectInfoSchema(session, parts.join(' AND ') || '1 = 1', cfg, (s) =>
-      /^(mysql|information_schema|performance_schema|sys)$/i.test(s),
+    return introspectInfoSchema(
+      session,
+      parts.join(' AND ') || '1 = 1',
+      cfg,
+      (s) => /^(mysql|information_schema|performance_schema|sys)$/i.test(s),
+      mysqlDriver.defaultSchema(cfg),
     );
   },
 };

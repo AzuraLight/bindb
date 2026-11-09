@@ -228,6 +228,8 @@ export async function connectDriver(
     return {
       execute: (sql, params) => session.execute(sql, params),
       onLost: (l) => session.onLost?.(l),
+      // JDBC 세션(H2 Remote)의 구조 정보 읽기를 그대로 넘긴다
+      ...(session.jdbcMetadata ? { jdbcMetadata: (keys: boolean) => session.jdbcMetadata!(keys), serverVersion: session.serverVersion } : {}),
       cancel: () => session.cancel(),
       close: async () => {
         try {

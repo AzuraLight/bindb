@@ -1,10 +1,11 @@
 import { closeSync, existsSync, openSync, readSync } from 'node:fs';
 import * as path from 'node:path';
-import { classifySql } from '../core/classify';
 import { resolvePath, resolveTarget } from './common';
 import { introspectInfoSchema } from './infoSchema';
 import { openJdbc, stopAllBridges, type JdbcSession } from './jdbc/bridge';
-import type { ConnectionConfig, ConnectOptions, Driver, QueryCursor, Session } from './types';
+import type { ConnectionConfig, ConnectOptions, Driver, IsolationLevel, JdbcMetadata, MetaTable, QueryCursor, Session } from './types';
+import { queryAll } from './cursor';
+import { levelsBySchema, loadsSources } from './introspection';
 
 /**
  * H2: JDBC 연동 모듈(필요할 때만 띄우는 JVM)로 H2 JDBC 드라이버에 직접 붙는다 — DataGrip · DBeaver와 같은 방식.
@@ -16,26 +17,34 @@ import type { ConnectionConfig, ConnectOptions, Driver, QueryCursor, Session } f
  * Advanced 탭: VM options · VM environment · Working directory는 JVM에, 드라이버 옵션은 URL의 ;KEY=VALUE로.
  */
 
+/** Transaction control · 격리 수준 → java.sql.Connection의 TRANSACTION_* 값 */
+const JDBC_ISOLATION: Record<IsolationLevel, number> = { readUncommitted: 1, readCommitted: 2, repeatableRead: 4, serializable: 8 };
+
 /** 기본 JVM 옵션: 적은 메모리로 도는 GC. 사용자의 VM options가 뒤에 붙어 이긴다 */
 const DEFAULT_VM_ARGS = ['-XX:+UseSerialGC'];
 
+/**
+ * H2에는 세션 단위 읽기 전용 명령이 없다(JDBC setReadOnly도 힌트일 뿐). 읽기 전용은 실행 전 판정으로 지킨다:
+ * 사용자 문장은 SessionManager.execute, AI 조회는 readOnlyQuery, 그리드 저장 · AI 쓰기는 읽기 전용이면 거부.
+ * 드라이버 안에서는 판정하지 않는다 — 접속 직후의 Time zone · 시작 스크립트(SET …)는 사용자가 정한 것이라 막으면 안 된다.
+ */
 class H2Session implements Session {
-  constructor(
-    private readonly jdbc: JdbcSession,
-    private readonly readOnly: boolean,
-  ) {}
+  constructor(private readonly jdbc: JdbcSession) {}
 
   onLost(listener: (e: Error) => void): void {
     this.jdbc.onLost(listener);
   }
 
-  async execute(sql: string, params?: readonly unknown[]): Promise<QueryCursor> {
-    // H2에는 세션 단위 읽기 전용 명령이 없다. 실행 전에 판정한다(여러 문장 · 파일 쓰기 함수 포함)
-    if (this.readOnly) {
-      const c = classifySql(sql, 'h2');
-      if (c.kind === 'write') throw new Error(`Connection is read-only: ${c.reason ?? 'this statement may change data'}.`);
-    }
+  execute(sql: string, params?: readonly unknown[]): Promise<QueryCursor> {
     return this.jdbc.execute(sql, params);
+  }
+
+  get serverVersion(): string {
+    return this.jdbc.serverVersion;
+  }
+
+  jdbcMetadata(keys: boolean): Promise<JdbcMetadata> {
+    return this.jdbc.jdbcMetadata(keys);
   }
 
   cancel(): Promise<void> {
@@ -61,8 +70,10 @@ export function h2JdbcUrl(cfg: ConnectionConfig, opts: ConnectOptions = {}): str
   if (file) {
     const full = resolvePath(cfg, file);
     // .h2.db = H2 1.3/1.4 PageStore(DataGrip의 Embedded 템플릿과 같은 MV_STORE=FALSE)
-    if (/\.h2\.db$/i.test(full)) return `jdbc:h2:file:${full.replace(/\.h2\.db$/i, '')};MV_STORE=FALSE;IFEXISTS=TRUE${settings}`;
-    return `jdbc:h2:file:${full.replace(/\.mv\.db$/i, '')};IFEXISTS=TRUE${settings}`;
+    // Create database면 IFEXISTS를 빼서 없는 파일을 새로 만든다
+    const ifExists = cfg.createDatabase ? '' : ';IFEXISTS=TRUE';
+    if (/\.h2\.db$/i.test(full)) return `jdbc:h2:file:${full.replace(/\.h2\.db$/i, '')};MV_STORE=FALSE${ifExists}${settings}`;
+    return `jdbc:h2:file:${full.replace(/\.mv\.db$/i, '')}${ifExists}${settings}`;
   }
   const db = (cfg.database ?? '').trim();
   if (!db) throw new Error('Set the H2 database (for example ~/test) for a remote connection.');
@@ -137,6 +148,39 @@ export function parseEnv(text: string): Record<string, string> {
   return env;
 }
 
+const isH2System = (s: string) => /^(information_schema|pg_catalog)$/i.test(s);
+
+/**
+ * Introspect using JDBC metadata: DatabaseMetaData(getTables · getColumns · getPrimaryKeys)로 읽는다.
+ * 수준 · Load sources for는 information_schema 경로와 같다. 뷰 정의는 INFORMATION_SCHEMA.VIEWS에서(있으면).
+ */
+async function introspectJdbc(session: Session, cfg: ConnectionConfig): Promise<MetaTable[]> {
+  const md = await session.jdbcMetadata!(true);
+  const keep = (schema: string) => cfg.showSystemSchemas || !isH2System(schema);
+  const tables = md.tables.filter(([schema, , type]) => keep(schema) && /TABLE|VIEW/i.test(type) && !/SYSTEM/i.test(type));
+  const levels = levelsBySchema(cfg, tables.map(([s]) => s), 'PUBLIC', isH2System);
+  const byKey = new Map<string, MetaTable>();
+  for (const [schema, name, type] of tables) {
+    byKey.set(`${schema}\u0000${name}`, { schema, name, kind: /VIEW/i.test(type) ? 'view' : 'table', columns: [], level: levels.get(schema) ?? 3 });
+  }
+  for (const [schema, table, name, typeName] of [...md.columns].sort((a, b) => a[4] - b[4])) {
+    const t = byKey.get(`${schema}\u0000${table}`);
+    t?.columns.push({ name, type: t.level === 1 ? undefined : typeName });
+  }
+  for (const [schema, table, column] of [...md.keys].sort((a, b) => a[3] - b[3])) {
+    const t = byKey.get(`${schema}\u0000${table}`);
+    if (t && (t.level ?? 3) >= 2) (t.primaryKey ??= []).push(column);
+  }
+  if ([...byKey.values()].some((t) => t.kind === 'view' && loadsSources(cfg, t.level ?? 3, isH2System(t.schema)))) {
+    const views = await queryAll(session, 'SELECT TABLE_SCHEMA, TABLE_NAME, VIEW_DEFINITION FROM INFORMATION_SCHEMA.VIEWS').catch(() => []);
+    for (const [schema, name, def] of views) {
+      const t = byKey.get(`${schema}\u0000${name}`);
+      if (t && def != null && loadsSources(cfg, t.level ?? 3, isH2System(t.schema))) t.definition = String(def);
+    }
+  }
+  return [...byKey.values()];
+}
+
 /** 확장을 끌 때(deactivate) 부른다 */
 export function stopAllH2Servers(): void {
   stopAllBridges();
@@ -156,7 +200,7 @@ export const h2Driver: Driver = {
       const file = resolvePath(cfg, resolved.file);
       const exists = existsSync(file);
       // Embedded: 없는 파일이면 빈 DB를 새로 만들지 않고 알린다(경로를 잘못 쓴 경우). URL only는 URL을 따른다(IFEXISTS)
-      if (!exists && cfg.connectionType !== 'url') throw new Error(`H2 database file not found: ${file}`);
+      if (!exists && cfg.connectionType !== 'url' && !cfg.createDatabase) throw new Error(`H2 database file not found: ${file} (turn on Create database to make a new one)`);
       // jar가 그 파일 형식을 못 열면 H2 오류가 알아보기 어렵다 — 먼저 알린다
       const problem = exists ? h2FileProblem(file, opts.h2Jar) : undefined;
       if (problem) throw new Error(problem);
@@ -174,6 +218,7 @@ export const h2Driver: Driver = {
           url,
           props: { user: resolved.user ?? cfg.user ?? '', password: password ?? '' },
           readOnly: !!cfg.readOnly,
+          ...(cfg.isolation ? { isolation: JDBC_ISOLATION[cfg.isolation] } : {}),
         },
       );
     const url = h2JdbcUrl(cfg, opts);
@@ -190,16 +235,19 @@ export const h2Driver: Driver = {
       if (!resolved.file || /DATABASE_TO_LOWER/i.test(url) || !/Schema "public" not found/.test((e as Error).message)) throw e;
       jdbc = await open(`${url};MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DEFAULT_NULL_ORDERING=HIGH`);
     }
-    return new H2Session(jdbc, !!cfg.readOnly);
+    return new H2Session(jdbc);
   },
 
   introspect(session, cfg) {
+    // Introspect using JDBC metadata — H2 1.x의 information_schema는 열 타입을 JDBC 숫자 코드로 준다
+    if (session.jdbcMetadata && (cfg.introspectJdbc || /^1\./.test(session.serverVersion ?? ''))) return introspectJdbc(session, cfg);
     // PG 모드로 만든 DB에는 pg_catalog도 있다. 대소문자 없이 거른다.
     return introspectInfoSchema(
       session,
       cfg.showSystemSchemas ? '1 = 1' : `UPPER(table_schema) NOT IN ('INFORMATION_SCHEMA', 'PG_CATALOG')`,
       cfg,
       (s) => /^(information_schema|pg_catalog)$/i.test(s),
+      'PUBLIC',
     );
   },
 };

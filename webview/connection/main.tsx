@@ -588,8 +588,9 @@ function App() {
               if (!src) return;
               const s = src.form.adv;
               const a = current.form.adv;
-              const picked = Object.fromEntries(Object.entries(s).filter(([k]) => /^(ssh|ssl)/.test(k)));
-              update(current.key, { form: { ...current.form, ssl: src.form.ssl, adv: { ...a, ...picked } } });
+              // DataGrip의 Copy from은 SSH 설정만 복사한다(SSL은 데이터 소스마다 다르다)
+              const picked = Object.fromEntries(Object.entries(s).filter(([k]) => /^ssh/.test(k)));
+              update(current.key, { form: { ...current.form, adv: { ...a, ...picked } } });
             }}
             ddlSources={drafts.filter((d) => d.form.adv.kind === 'ddl').map((d) => ({ key: d.key, name: effective(d).name || 'Untitled' }))}
             onCreateMapping={() => createMapping(current.key)}

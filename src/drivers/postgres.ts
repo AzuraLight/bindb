@@ -5,6 +5,7 @@ import { tokenize } from '../language/tokenizer';
 import { driverOptionValues, isSslUnsupported, resolveTarget, tlsOptions } from './common';
 import { BufferedCursor, emptyCursor, queryAll } from './cursor';
 import { introspectInfoSchema } from './infoSchema';
+import { levelsBySchema, loadsSources, type IntrospectionLevel } from './introspection';
 import type { ConnectionConfig, ConnectOptions, Driver, MetaTable, QueryCursor, Session } from './types';
 
 const FIRST_BATCH = 200;
@@ -109,8 +110,14 @@ export function sendCancelRequest(host: string, port: number, pid: number, key: 
  * pg_matviews · pg_attribute에서 읽어 뷰로 더한다(읽기 전용, 정의는 Load sources for를 따른다).
  * https://www.postgresql.org/docs/current/view-pg-matviews.html
  */
-async function materializedViews(session: Session, filter: string, cfg: ConnectionConfig, isSystem: (s: string) => boolean): Promise<MetaTable[]> {
-  const level = cfg.introspectionLevel ?? 3;
+async function materializedViews(
+  session: Session,
+  filter: string,
+  cfg: ConnectionConfig,
+  isSystem: (s: string) => boolean,
+  /** 같은 스키마의 테이블이 받은 수준(머티리얼라이즈드 뷰도 그 수준을 따른다) */
+  known: Map<string, IntrospectionLevel>,
+): Promise<MetaTable[]> {
   let views: unknown[][];
   try {
     views = await queryAll(
@@ -123,34 +130,35 @@ async function materializedViews(session: Session, filter: string, cfg: Connecti
     return [];
   }
   if (!views.length) return [];
-  const columns =
-    level === 1
-      ? []
-      : await queryAll(
-          session,
-          `SELECT table_schema, table_name, column_name, data_type FROM (
-             SELECT n.nspname AS table_schema, c.relname AS table_name, a.attname AS column_name,
-                    pg_catalog.format_type(a.atttypid, a.atttypmod) AS data_type, a.attnum
-               FROM pg_catalog.pg_class c
-               JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-               JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid
-              WHERE c.relkind = 'm' AND a.attnum > 0 AND NOT a.attisdropped) m
-           WHERE ${filter} ORDER BY table_schema, table_name, attnum`,
-        );
-  const load = level < 3 ? 'none' : (cfg.loadSources ?? 'nonSystem');
+  const own = levelsBySchema(cfg, views.map(([s]) => String(s)), 'public', isSystem);
+  const levelOf = (schema: string) => known.get(schema) ?? own.get(schema) ?? 3;
+  // 열 이름은 1단계에서도 읽는다. 타입은 2단계부터
+  const columns = await queryAll(
+    session,
+    `SELECT table_schema, table_name, column_name, data_type FROM (
+       SELECT n.nspname AS table_schema, c.relname AS table_name, a.attname AS column_name,
+              pg_catalog.format_type(a.atttypid, a.atttypmod) AS data_type, a.attnum
+         FROM pg_catalog.pg_class c
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+         JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid
+        WHERE c.relkind = 'm' AND a.attnum > 0 AND NOT a.attisdropped) m
+     WHERE ${filter} ORDER BY table_schema, table_name, attnum`,
+  );
   const byKey = new Map<string, MetaTable>();
   for (const [schema, name, def] of views) {
-    const loadDef = load === 'all' || (load === 'nonSystem' && !isSystem(String(schema)));
+    const level = levelOf(String(schema));
     byKey.set(`${schema}\u0000${name}`, {
       schema: String(schema),
       name: String(name),
       kind: 'view',
       columns: [],
-      ...(loadDef && def != null ? { definition: String(def) } : {}),
+      level,
+      ...(loadsSources(cfg, level, isSystem(String(schema))) && def != null ? { definition: String(def) } : {}),
     });
   }
   for (const [schema, table, name, type] of columns) {
-    byKey.get(`${schema}\u0000${table}`)?.columns.push({ name: String(name), type: type == null ? undefined : String(type) });
+    const t = byKey.get(`${schema}\u0000${table}`);
+    t?.columns.push({ name: String(name), type: t.level === 1 || type == null ? undefined : String(type) });
   }
   return [...byKey.values()];
 }
@@ -260,7 +268,8 @@ export const postgresDriver: Driver = {
       ? `table_schema NOT LIKE 'pg\\_temp%'`
       : `table_schema NOT IN ('pg_catalog', 'information_schema') AND table_schema NOT LIKE 'pg\\_toast%' AND table_schema NOT LIKE 'pg\\_temp%'`;
     const isSystem = (s: string) => /^(pg_catalog|information_schema|pg_toast.*)$/.test(s);
-    const tables = await introspectInfoSchema(session, filter, cfg, isSystem);
-    return [...tables, ...(await materializedViews(session, filter, cfg, isSystem))];
+    const tables = await introspectInfoSchema(session, filter, cfg, isSystem, 'public');
+    const known = new Map(tables.map((t) => [t.schema, t.level ?? 3] as const));
+    return [...tables, ...(await materializedViews(session, filter, cfg, isSystem, known))];
   },
 };

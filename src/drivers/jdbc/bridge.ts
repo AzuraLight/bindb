@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs';
 import * as path from 'node:path';
 import { createInterface } from 'node:readline';
 import { BufferedCursor, emptyCursor } from '../cursor';
-import type { ColumnMeta, QueryCursor, Session } from '../types';
+import type { ColumnMeta, JdbcMetadata, QueryCursor, Session } from '../types';
 
 /*
  * JDBC 연동 모듈(Node 쪽). JDBC 드라이버는 Java라서, 필요할 때만 띄우는 JVM(java/bridge의 bindb.JdbcBridge)에서
@@ -31,6 +31,8 @@ export interface JdbcTarget {
   url: string;
   props?: Record<string, string | undefined>;
   readOnly?: boolean;
+  /** JDBC Connection.setTransactionIsolation 값(1 · 2 · 4 · 8) */
+  isolation?: number;
 }
 
 /** 런타임 jar: 빌드하면 out/ 옆에, 번들 없이 돌 때(테스트)는 저장소의 java/ */
@@ -245,6 +247,17 @@ export class JdbcSession implements Session {
 
   async cancel(): Promise<void> {
     if (!this.closed) await this.bridge.request('cancel', { conn: this.conn }).catch(() => {});
+  }
+
+  get serverVersion(): string {
+    return this.version;
+  }
+
+  /** Introspect using JDBC metadata */
+  async jdbcMetadata(keys: boolean): Promise<JdbcMetadata> {
+    if (this.closed) throw new Error('The connection is closed.');
+    const r = await this.bridge.request('metadata', { conn: this.conn, keys });
+    return { tables: r.tables as JdbcMetadata['tables'], columns: r.columns as JdbcMetadata['columns'], keys: r.keys as JdbcMetadata['keys'] };
   }
 
   async close(): Promise<void> {

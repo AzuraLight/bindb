@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { createWriteStream } from 'node:fs';
 import * as vscode from 'vscode';
 import { classifySql } from '../core/classify';
+import { withSessionTemplate } from '../core/connectionDraft';
 import { kw, withCodeStyle } from '../core/ddl';
 import { buildEditStatements, emptyChanges, type EditValue, type PendingChanges } from '../core/editing';
 import { buildFilteredSql, isWrappable } from '../core/gridQuery';
@@ -152,7 +153,7 @@ export class ResultPanel implements vscode.Disposable {
   private editability(cur: Current): Editability {
     const s = cur.source;
     if (!s) return { editable: false, reason: 'Query results are read-only. Open the table (Open Table Data) to edit rows.' };
-    if (cur.cfg.readOnly) return { editable: false, reason: `${cur.cfg.name} is read-only.` };
+    if (withSessionTemplate(cur.cfg).readOnly) return { editable: false, reason: `${cur.cfg.name} is read-only.` };
     if (cur.cfg.kind === 'ddl') return { editable: false, reason: 'DDL data sources have no data.' };
     if (s.table.kind === 'view') return { editable: false, reason: 'Views are read-only here.' };
     if (!s.key.length) return { editable: false, reason: `${s.table.name} has no primary key, so rows cannot be identified.` };

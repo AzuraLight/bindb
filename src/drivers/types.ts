@@ -21,6 +21,8 @@ export interface ConnectionConfig {
   /** sqlite: DB 파일 / h2: 파일 모드에서 열 .mv.db 파일 */
   file?: string;
   readOnly?: boolean;
+  /** General · Create database: H2 Embedded에서 파일이 없으면 새로 만든다(IFEXISTS 없이). 없으면 없는 파일은 오류 */
+  createDatabase?: boolean;
   /** postgres · mysql. 없으면 disable */
   ssl?: SslMode;
   /** 사람이 붙이는 메모(탐색기 툴팁) */
@@ -42,10 +44,14 @@ export interface ConnectionConfig {
 
   /** Options · Connection */
   transactionControl?: 'auto' | 'manual';
+  /** Transaction control의 격리 수준. 없으면 DB 기본값. SQLite에는 없다 */
+  isolation?: IsolationLevel;
   switchSchema?: 'automatic' | 'manual' | 'disable';
   timeZone?: string;
   /** 초. 없으면 끔 */
   keepAlive?: number;
+  /** keep-alive로 보낼 쿼리. 없으면 SELECT 1 (DataGrip은 드라이버 설정의 Keep-alive query) */
+  keepAliveQuery?: string;
   /** 초. 없으면 끔 */
   autoDisconnect?: number;
   singleDatabase?: boolean;
@@ -62,8 +68,10 @@ export interface ConnectionConfig {
   preIntrospected?: boolean;
   /** Virtual objects and attributes: 가상 객체 파일. 없으면 확장 저장소의 external-data-<id>.json */
   virtualObjectsFile?: string;
-  /** Default level: 1 = 이름만, 2 = 소스 코드 빼고 전부, 3 = 전부. 없으면 3 */
+  /** Default level: 1 = 이름만, 2 = 소스 코드 빼고 전부, 3 = 전부. 없으면 자동(스키마의 객체 수로, DataGrip과 같다) */
   introspectionLevel?: 1 | 2 | 3;
+  /** 스키마마다 지정한 수준(탐색기 · Introspection Level). Default level보다 앞선다 */
+  schemaLevels?: Record<string, 1 | 2 | 3>;
 
   /** SSH/SSL · SSL 파일 */
   sslCaFile?: string;
@@ -100,6 +108,12 @@ export interface ConnectionConfig {
   /** 데이터 소스 색(#rrggbb) */
   color?: string;
 
+  /** 이 데이터 소스가 쓸 드라이버 파일(H2 jar). 없으면 bindb.h2.jarPath. 세션 템플릿의 Driver가 여기로 들어온다 */
+  driverFile?: string;
+
+  /** Advanced · Introspect using JDBC metadata(JDBC로 붙는 H2). H2 1.x는 켜지 않아도 이 방식을 쓴다 */
+  introspectJdbc?: boolean;
+
   /** Advanced */
   driverOptions?: Record<string, string>;
   vmOptions?: string;
@@ -108,11 +122,21 @@ export interface ConnectionConfig {
   workingDirectory?: string;
 }
 
+/**
+ * Options · Other · Session templates. 템플릿 값은 데이터 소스의 값을 덮어쓴다(DataGrip: "Template settings override
+ * general connection settings"). 비어 있는 칸은 데이터 소스 값을 그대로 쓴다.
+ */
 export interface SessionTemplate {
   name: string;
+  /** Authentication */
+  auth?: AuthMode;
   user?: string;
+  /** true = 읽기 전용, false = 읽기 전용 끔, 없으면 데이터 소스 값 */
   readOnly?: boolean;
+  /** 있으면 데이터 소스의 시작 스크립트 대신 */
   startupScript?: string;
+  /** Driver: 이 템플릿이 쓸 드라이버 파일(H2 jar) */
+  driverFile?: string;
 }
 
 export interface CodeStyle {
@@ -122,6 +146,7 @@ export interface CodeStyle {
 }
 
 export type AuthMode = 'password' | 'none' | 'pgpass';
+export type IsolationLevel = 'readUncommitted' | 'readCommitted' | 'repeatableRead' | 'serializable';
 export type PasswordSave = 'never' | 'restart' | 'session' | 'forever';
 
 export interface SshConfig {
@@ -193,6 +218,17 @@ export interface Session {
   execute(sql: string, params?: readonly unknown[]): Promise<QueryCursor>;
   cancel(): Promise<void>;
   close(): Promise<void>;
+  /** JDBC로 붙는 세션(H2)만: DatabaseMetaData로 읽은 테이블 · 열 · 기본키(Introspect using JDBC metadata) */
+  jdbcMetadata?(keys: boolean): Promise<JdbcMetadata>;
+  /** 서버 버전(JDBC getDatabaseProductVersion) */
+  readonly serverVersion?: string;
+}
+
+/** DatabaseMetaData 결과: tables [schema, name, type] · columns [schema, table, name, typeName, position] · keys [schema, table, column, seq] */
+export interface JdbcMetadata {
+  tables: [string, string, string][];
+  columns: [string, string, string, string, number][];
+  keys: [string, string, string, number][];
 }
 
 export interface MetaTable {
@@ -204,6 +240,8 @@ export interface MetaTable {
   primaryKey?: string[];
   /** 뷰 정의(Load sources for) */
   definition?: string;
+  /** 이 객체를 읽은 수준(1 = 이름만이라 열 타입이 없다) */
+  level?: 1 | 2 | 3;
 }
 
 export interface Driver {

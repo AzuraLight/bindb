@@ -174,6 +174,37 @@ export function activate(context: vscode.ExtensionContext): BindbTestApi {
       );
     }),
 
+    // 탐색기 · Introspection Level: 데이터 소스의 Default level 또는 스키마 하나의 수준(DataGrip과 같다)
+    vscode.commands.registerCommand('bindb.introspectionLevel', async (node?: Node) => {
+      const cfg = node && 'cfg' in node ? store.get(node.cfg.id) : await pickConnection(store, 'Introspection level of which connection?');
+      if (!cfg) return;
+      const schema = node?.kind === 'schema' ? node.schema : undefined;
+      const current = schema ? cfg.schemaLevels?.[schema] : cfg.introspectionLevel;
+      const levels: { label: string; level?: 1 | 2 | 3; detail: string }[] = [
+        { label: schema ? 'Inherit' : 'Auto', detail: schema ? 'Use the data source default' : 'By schema size, as DataGrip: current schema ≤ 1000 objects → 3, ≤ 3000 → 2, otherwise 1' },
+        { label: 'Level 1', level: 1, detail: 'Names only (column types are not read)' },
+        { label: 'Level 2', level: 2, detail: 'Everything except source code' },
+        { label: 'Level 3', level: 3, detail: 'Everything' },
+      ];
+      const pick = await vscode.window.showQuickPick(
+        levels.map((l) => ({ ...l, description: l.level === current ? 'current' : undefined })),
+        { placeHolder: schema ? `Introspection level of ${schema}` : `Default introspection level of ${cfg.name}` },
+      );
+      if (!pick) return;
+      const { id, ...rest } = cfg;
+      if (schema) {
+        const schemaLevels = { ...(cfg.schemaLevels ?? {}) };
+        if (pick.level) schemaLevels[schema] = pick.level;
+        else delete schemaLevels[schema];
+        rest.schemaLevels = Object.keys(schemaLevels).length ? schemaLevels : undefined;
+      } else {
+        rest.introspectionLevel = pick.level;
+      }
+      const updated = await store.update(id, rest);
+      // Auto sync처럼 바꾸면 바로 다시 읽는다
+      await sessions.metadata(updated, true).catch((e) => vscode.window.showErrorMessage(errorText(e)));
+    }),
+
     vscode.commands.registerCommand('bindb.disconnect', async (node?: Node) => {
       const cfg = await connectionOf(node, 'Disconnect which connection?');
       if (cfg) await sessions.disconnect(cfg.id);

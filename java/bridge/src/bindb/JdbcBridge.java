@@ -39,7 +39,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  * 프로토콜: 표준 입력으로 요청 JSON 한 줄, 표준 출력으로 응답 JSON 한 줄. 네트워크 포트는 열지 않는다.
  *   요청  {"id":1,"op":"open","jars":[…],"driver":"org.h2.Driver","url":"jdbc:h2:…","props":{…},"readOnly":false}
  *   응답  {"id":1,"ok":true,…} 또는 {"id":1,"ok":false,"error":"…","sqlState":"…"}
- * op: open · execute · fetch · closeCursor · cancel · close · ping. cancel · close는 실행 중인 쿼리를 기다리지 않는다. 시작하면 {"ready":true}를 한 번 보낸다.
+ * op: open · execute · fetch · metadata · closeCursor · cancel · close · ping. cancel · close는 실행 중인 쿼리를 기다리지 않는다. 시작하면 {"ready":true}를 한 번 보낸다.
  * 표준 입력이 닫히면(확장이 끝나면) 연결을 모두 닫고 끝난다 — H2 파일 잠금이 남지 않게.
  *
  * 연결마다 작업 스레드 하나(문장은 차례로), cancel은 읽는 스레드에서 바로 처리한다(실행 중인 Statement.cancel()).
@@ -133,6 +133,8 @@ public final class JdbcBridge {
         // DriverManager 대신 드라이버를 직접 부른다 — 따로 불러온 클래스 로더의 드라이버는 DriverManager가 보지 못한다
         Connection c = driver.connect(str(msg.get("url")), props);
         if (c == null) throw new SQLException("The driver does not accept this URL: " + msg.get("url"));
+        // Transaction control · 격리 수준(TRANSACTION_* 값)
+        if (msg.get("isolation") instanceof Number) c.setTransactionIsolation(((Number) msg.get("isolation")).intValue());
         if (Boolean.TRUE.equals(msg.get("readOnly"))) {
             try {
                 c.setReadOnly(true);
@@ -190,6 +192,8 @@ public final class JdbcBridge {
                     if (cur == null) throw new IllegalStateException("This result was closed.");
                     return rows(cur, num(msg.get("n"), 200));
                 }
+                case "metadata":
+                    return metadata(Boolean.TRUE.equals(msg.get("keys")));
                 case "closeCursor": {
                     Cursor cur = cursors.remove(str(msg.get("cursor")));
                     if (cur != null) cur.close();
@@ -258,6 +262,36 @@ public final class JdbcBridge {
                 cur.close();
             }
             return obj("rows", rows, "done", done);
+        }
+
+        /**
+         * Introspect using JDBC metadata: DatabaseMetaData로 테이블 · 열 · (keys면) 기본키를 읽는다.
+         * 드라이버의 information_schema가 표준과 다를 때(H2 1.4는 열 타입을 JDBC 숫자 코드로 준다) 쓴다.
+         */
+        Map<String, Object> metadata(boolean keys) throws SQLException {
+            DatabaseMetaData md = connection.getMetaData();
+            List<Object> tables = new ArrayList<>();
+            try (ResultSet rs = md.getTables(null, null, "%", null)) {
+                while (rs.next()) tables.add(listOf(rs.getString("TABLE_SCHEM"), rs.getString("TABLE_NAME"), rs.getString("TABLE_TYPE")));
+            }
+            List<Object> columns = new ArrayList<>();
+            try (ResultSet rs = md.getColumns(null, null, "%", "%")) {
+                while (rs.next()) {
+                    columns.add(listOf(rs.getString("TABLE_SCHEM"), rs.getString("TABLE_NAME"), rs.getString("COLUMN_NAME"), rs.getString("TYPE_NAME"), rs.getInt("ORDINAL_POSITION")));
+                }
+            }
+            List<Object> pks = new ArrayList<>();
+            if (keys) {
+                for (Object t : tables) {
+                    List<?> row = (List<?>) t;
+                    String type = str(row.get(2));
+                    if (!"TABLE".equalsIgnoreCase(type) && !"BASE TABLE".equalsIgnoreCase(type)) continue;
+                    try (ResultSet rs = md.getPrimaryKeys(null, (String) row.get(0), (String) row.get(1))) {
+                        while (rs.next()) pks.add(listOf(rs.getString("TABLE_SCHEM"), rs.getString("TABLE_NAME"), rs.getString("COLUMN_NAME"), rs.getInt("KEY_SEQ")));
+                    }
+                }
+            }
+            return obj("tables", tables, "columns", columns, "keys", pks);
         }
 
         void cancelRunning() {
@@ -406,6 +440,12 @@ public final class JdbcBridge {
         Map<String, Object> m = new LinkedHashMap<>();
         for (int i = 0; i + 1 < kv.length; i += 2) m.put(String.valueOf(kv[i]), kv[i + 1]);
         return m;
+    }
+
+    static List<Object> listOf(Object... items) {
+        List<Object> l = new ArrayList<>(items.length);
+        for (Object o : items) l.add(o);
+        return l;
     }
 
     static String str(Object o) {

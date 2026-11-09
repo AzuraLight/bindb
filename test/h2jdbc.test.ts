@@ -157,6 +157,33 @@ describe('H2 through the JDBC bridge (real Java)', { skip: !(java && jar) && 'se
     await holder.close();
   });
 
+  it('Create database: a missing file is an error unless it is turned on', async () => {
+    const missing = file('brand-new');
+    await assert.rejects(h2Driver.connect(missing, opts), /not found.*Create database/);
+    const s = await h2Driver.connect({ ...missing, createDatabase: true }, opts);
+    await queryAll(s, 'CREATE TABLE N (ID INT)');
+    await s.close();
+    const again = await h2Driver.connect(missing, opts);
+    assert.deepEqual(await queryAll(again, 'SELECT COUNT(*) FROM N'), [['0']]);
+    await again.close();
+  });
+
+  it('isolation level is applied through JDBC', async () => {
+    const s = await h2Driver.connect(file('javaapp', { isolation: 'serializable' }), opts);
+    assert.deepEqual(await queryAll(s, 'SELECT ISOLATION_LEVEL FROM INFORMATION_SCHEMA.SESSIONS WHERE SESSION_ID = SESSION_ID()'), [['SERIALIZABLE']]);
+    await s.close();
+  });
+
+  it('Introspect using JDBC metadata gives the same tables, keys and readable types', async () => {
+    const s = await h2Driver.connect(file('javaapp'), opts);
+    const viaInfo = await h2Driver.introspect(s, file('javaapp'));
+    const viaJdbc = await h2Driver.introspect(s, file('javaapp', { introspectJdbc: true }));
+    const shape = (m: typeof viaInfo) => m.map((t) => `${t.schema}.${t.name}:${t.kind}:${t.primaryKey ?? ''}:${t.columns.map((c) => c.name)}`);
+    assert.deepEqual(shape(viaJdbc), shape(viaInfo));
+    assert.equal(viaJdbc.find((t) => t.name === 'CUSTOMER')!.columns[0].type, 'INTEGER');
+    await s.close();
+  });
+
   it('a killed Java process is reported as a lost connection', async () => {
     const s = await h2Driver.connect(file('javaapp'), opts);
     const lost: string[] = [];
@@ -169,10 +196,14 @@ describe('H2 through the JDBC bridge (real Java)', { skip: !(java && jar) && 'se
     assert.equal(runningBridges(), 0);
   });
 
-  it('read-only sessions refuse writes before they reach H2', async () => {
+  // 읽기 전용은 SessionManager가 실행 전에 판정한다. 드라이버가 막으면 접속 직후의 SET TIME ZONE · 시작 스크립트까지 막혔다
+  it('a read-only data source still runs its setup statements (SET …)', async () => {
     const s = await h2Driver.connect(file('javaapp', { readOnly: true }), opts);
-    await assert.rejects(s.execute("INSERT INTO CUSTOMER VALUES (9, 'x')"), /read-only/);
-    await assert.rejects(s.execute("(SELECT CSVWRITE('/dev/null', 'SELECT 1'))"), /read-only/);
-    await s.close();
+    try {
+      await (await s.execute("SET TIME ZONE 'Asia/Seoul'")).close();
+      assert.deepEqual(await queryAll(s, 'SELECT COUNT(*) FROM CUSTOMER'), [['2']]);
+    } finally {
+      await s.close();
+    }
   });
 });

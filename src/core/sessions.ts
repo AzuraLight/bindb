@@ -8,7 +8,7 @@ import { connectDriver } from '../drivers/tunnel';
 import type { SharedSshConfig } from '../drivers/types';
 import { withSessionTemplate } from './connectionDraft';
 import { classifySql } from './classify';
-import { cannotRunInTransaction, switchSchemaSql } from './sessionSql';
+import { cannotRunInTransaction, isolationSql, switchSchemaSql } from './sessionSql';
 import { parseDdl } from './ddl';
 import { splitStatements } from '../language/splitter';
 import type { ConnectionStore } from './connections';
@@ -158,7 +158,8 @@ export class SessionManager implements vscode.Disposable {
     const cfg = resolveSharedSsh(withSessionTemplate(original), sharedSshConfigs());
     await this.beforeConnection(cfg);
     const password = await this.password(cfg);
-    const h2Jar = vscode.workspace.getConfiguration('bindb').get<string>('h2.jarPath') || undefined;
+    // 세션 템플릿의 Driver(드라이버 파일)가 있으면 그것을 쓴다
+    const h2Jar = cfg.driverFile || vscode.workspace.getConfiguration('bindb').get<string>('h2.jarPath') || undefined;
     const sslKeyPassword = cfg.sslKeyFile ? await this.store.secret('sslKey', cfg.id) : undefined;
     const sshSecret = cfg.ssh?.enabled && cfg.ssh.auth !== 'agent' ? await this.store.secret('ssh', sshSecretOwner(cfg)) : undefined;
     const session = await connectDriver(drivers[cfg.driver], cfg, { password, h2Jar, sslKeyPassword, sshSecret, askHostKey, askKeyboard });
@@ -291,7 +292,8 @@ export class SessionManager implements vscode.Disposable {
     statements: readonly { sql: string; params: unknown[]; expectOne: boolean }[],
     ctx: RunContext = {},
   ): Promise<{ committed: boolean }> {
-    if (cfg.readOnly) throw new Error(`${cfg.name} is read-only.`);
+    // 세션 템플릿이 읽기 전용을 켜거나 끈 값을 본다
+    if (withSessionTemplate(cfg).readOnly) throw new Error(`${cfg.name} is read-only.`);
     const target = ctx.database && ctx.database !== cfg.database ? { ...cfg, database: ctx.database } : cfg;
     const entry = this.open(target, this.channel(cfg, 'query', ctx, ctx.database));
     const manual = cfg.transactionControl === 'manual';
@@ -467,7 +469,7 @@ export class SessionManager implements vscode.Disposable {
       entry.keepAlive = setInterval(() => {
         if (entry.cursor || !this.live.has(entry.key)) return;
         // keep-alive는 사용으로 치지 않는다(자동 끊기 시계를 되돌리지 않게)
-        void this.enqueue(entry, async (s) => (await s.execute('SELECT 1')).close(), false).catch(() => {});
+        void this.enqueue(entry, async (s) => (await s.execute(cfg.keepAliveQuery || 'SELECT 1')).close(), false).catch(() => {});
       }, cfg.keepAlive * 1000);
     }
     const t = this.timers.get(cfg.id) ?? {};
@@ -525,6 +527,8 @@ export function setupStatements(cfg: ConnectionConfig): string[] {
     if (cfg.driver === 'mysql') out.push(`SET time_zone = ${lit(tz)}`);
     else if (cfg.driver === 'postgres' || cfg.driver === 'h2') out.push(`SET TIME ZONE ${lit(tz)}`);
   }
+  const iso = isolationSql(cfg);
+  if (iso) out.push(iso);
   if (cfg.transactionControl === 'manual') {
     if (cfg.driver === 'mysql') out.push('SET autocommit = 0');
     else if (cfg.driver === 'h2') out.push('SET AUTOCOMMIT FALSE');

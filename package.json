@@ -2,7 +2,7 @@
   "name": "bindb",
   "displayName": "BindB — Database IDE",
   "description": "Schema-aware SQL editing and a fast result grid for PostgreSQL, MySQL, SQLite and H2.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "AzuraLight",
   "author": {
     "name": "AzuraLight"
@@ -439,6 +439,12 @@
         "command": "bindb.clearHistory",
         "title": "Clear Query History",
         "category": "BindB"
+      },
+      {
+        "command": "bindb.introspectionLevel",
+        "title": "Introspection Level…",
+        "category": "BindB",
+        "icon": "$(layers)"
       }
     ],
     "menus": {
@@ -549,6 +555,11 @@
           "command": "bindb.virtual.remove",
           "when": "view == bindb.explorer && viewItem == virtual",
           "group": "9_danger@1"
+        },
+        {
+          "command": "bindb.introspectionLevel",
+          "when": "view == bindb.explorer && (viewItem =~ /^connection/ || viewItem == schema)",
+          "group": "2_introspect@1"
         }
       ],
       "editor/title": [
