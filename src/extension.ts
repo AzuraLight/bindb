@@ -5,6 +5,7 @@ import { drivers, type ConnectionConfig, type DriverId } from './drivers';
 import { SqlCompletionProvider } from './language/completion';
 import { splitStatements, statementAt } from './language/splitter';
 import { ConnectionPanel, type Applied } from './ui/connectionPanel';
+import { UnresolvedDiagnostics } from './ui/diagnostics';
 import { BindingStatus, boundConnection, boundSchema, pickConnection, setBinding, setSchemaBinding } from './ui/binding';
 import { RunCodeLensProvider } from './ui/codelens';
 import { errorText, ExplorerProvider, type Node } from './ui/explorer';
@@ -143,6 +144,7 @@ export function activate(context: vscode.ExtensionContext): BindbTestApi {
     vscode.window.registerTreeDataProvider('bindb.explorer', explorer),
     vscode.languages.registerCodeLensProvider(SQL, new RunCodeLensProvider(store)),
     vscode.languages.registerCompletionItemProvider(SQL, new SqlCompletionProvider(store, sessions, virtual), '.', ' '),
+    new UnresolvedDiagnostics(store, sessions),
 
     vscode.commands.registerCommand('bindb.addConnection', () => showPanel({ pickDriver: true })),
     vscode.commands.registerCommand('bindb.manageConnections', () => showPanel({})),

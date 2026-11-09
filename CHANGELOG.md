@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Unresolved reference warnings** in SQL files bound to a connection, like DataGrip's inspection:
+  unknown tables after `FROM` / `JOIN` / `UPDATE` / `INSERT INTO` / `DELETE … USING`, unknown columns
+  qualified by a table or alias (`u.nmae`), in `INSERT` column lists and in single-table `UPDATE … SET`.
+  Only already-loaded metadata is used (no connection is opened for this). Schemas that were not
+  introspected, CTEs, objects created earlier in the same file, table functions and subqueries are not
+  judged. Unqualified columns are not checked yet. Setting: `bindb.diagnostics.unresolvedReferences`.
+
 ## 0.3.0 — 2026-11-09
 
 Not published to marketplaces (BindB stays private until 1.0.0). Two changes need action after updating:

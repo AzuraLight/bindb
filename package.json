@@ -123,6 +123,11 @@
           "description": "Path to the H2 JDBC driver (h2-*.jar). BindB runs it in a Java process (Java 11+, JAVA_HOME or java on PATH) only while an H2 connection is open.",
           "scope": "machine"
         },
+        "bindb.diagnostics.unresolvedReferences": {
+          "type": "boolean",
+          "default": true,
+          "description": "Warn about tables and columns that are not in the bound connection's loaded metadata (DataGrip's unresolved reference inspection). Only metadata that is already loaded is used; no connection is opened for this."
+        },
         "bindb.grid.pageSize": {
           "type": "number",
           "default": 500,
