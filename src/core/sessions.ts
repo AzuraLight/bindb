@@ -3,10 +3,12 @@ import { drivers, type ConnectionConfig, type FetchResult, type MetaTable, type 
 import { readdir, readFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import { resolveSharedSsh, sshSecretOwner } from '../drivers/common';
+import { queryAll } from '../drivers/cursor';
 import { connectDriver } from '../drivers/tunnel';
 import type { SharedSshConfig } from '../drivers/types';
 import { withSessionTemplate } from './connectionDraft';
 import { classifySql } from './classify';
+import { cannotRunInTransaction, switchSchemaSql } from './sessionSql';
 import { parseDdl } from './ddl';
 import { splitStatements } from '../language/splitter';
 import type { ConnectionStore } from './connections';
@@ -32,6 +34,8 @@ interface Live {
   inTx: boolean;
   /** 이 세션에 지금 걸린 스키마(Switch schema) */
   currentSchema?: string;
+  /** postgres: 스키마를 바꾸기 전의 search_path(SHOW search_path) */
+  baseSearchPath?: string;
   keepAlive?: ReturnType<typeof setInterval>;
 }
 
@@ -157,7 +161,7 @@ export class SessionManager implements vscode.Disposable {
     const h2Jar = vscode.workspace.getConfiguration('bindb').get<string>('h2.jarPath') || undefined;
     const sslKeyPassword = cfg.sslKeyFile ? await this.store.secret('sslKey', cfg.id) : undefined;
     const sshSecret = cfg.ssh?.enabled && cfg.ssh.auth !== 'agent' ? await this.store.secret('ssh', sshSecretOwner(cfg)) : undefined;
-    const session = await connectDriver(drivers[cfg.driver], cfg, { password, h2Jar, sslKeyPassword, sshSecret, askHostKey });
+    const session = await connectDriver(drivers[cfg.driver], cfg, { password, h2Jar, sslKeyPassword, sshSecret, askHostKey, askKeyboard });
     try {
       for (const sql of setupStatements(cfg)) await (await session.execute(sql)).close();
     } catch (e) {
@@ -217,7 +221,8 @@ export class SessionManager implements vscode.Disposable {
       await this.applySchema(cfg, entry, session, ctx.schema, false);
       // Transaction control · Manual: postgres · sqlite는 자동 커밋을 끌 수 없어 첫 문장 앞에 BEGIN을 보낸다
       if (cfg.transactionControl === 'manual' && (cfg.driver === 'postgres' || cfg.driver === 'sqlite')) {
-        if (!entry.inTx && !TX_CONTROL.test(sql)) {
+        // 트랜잭션 블록 안에서 실행할 수 없는 문장(VACUUM · CREATE INDEX CONCURRENTLY …)은 BEGIN 없이 보낸다
+        if (!entry.inTx && !TX_CONTROL.test(sql) && !cannotRunInTransaction(sql, cfg.driver)) {
           await (await session.execute('BEGIN')).close();
           entry.inTx = true;
         }
@@ -358,7 +363,11 @@ export class SessionManager implements vscode.Disposable {
     const mode = cfg.switchSchema ?? 'manual';
     // Automatic: 콘솔의 @schema를 실행할 때마다(다시 접속한 뒤에도) 되살린다. Manual: 사용자가 바꿀 때만.
     if (mode === 'disable' || (mode === 'manual' && !explicit)) return;
-    const sql = switchSchemaSql(cfg, schema);
+    // postgres: 세션이 처음 가진 search_path를 기억해 두고 고른 스키마를 그 앞에 붙인다
+    if (cfg.driver === 'postgres' && entry.baseSearchPath === undefined) {
+      entry.baseSearchPath = String((await queryAll(session, 'SHOW search_path'))[0]?.[0] ?? '');
+    }
+    const sql = switchSchemaSql(cfg, schema, entry.baseSearchPath);
     if (!sql) return;
     await (await session.execute(sql)).close();
     entry.currentSchema = schema;
@@ -524,22 +533,6 @@ export function setupStatements(cfg: ConnectionConfig): string[] {
   return out;
 }
 
-/** Switch schema 문장 */
-export function switchSchemaSql(cfg: ConnectionConfig, schema: string): string | undefined {
-  const q = drivers[cfg.driver].quote;
-  const ident = q + schema.split(q).join(q + q) + q;
-  switch (cfg.driver) {
-    case 'postgres':
-      return `SET search_path TO ${ident}`;
-    case 'mysql':
-      return `USE ${ident}`;
-    case 'h2':
-      return `SET SCHEMA ${ident}`;
-    default:
-      return undefined;
-  }
-}
-
 /** DDL data source: 폴더(하위 폴더 포함)의 .sql 파일 → 메타데이터. 하위 폴더 이름은 스키마로 본다 */
 export async function readDdlFolder(cfg: ConnectionConfig): Promise<MetaTable[]> {
   const root = cfg.ddlFolder;
@@ -584,9 +577,23 @@ async function runTasks(names: string[]): Promise<void> {
   }
 }
 
-/** 공유 SSH 설정(사용자 설정 bindb.ssh.configurations) */
+/**
+ * 공유 SSH 설정(사용자 설정 bindb.ssh.configurations). 사용자(전역) 설정에서만 읽는다 —
+ * 작업 공간 설정이 같은 id로 다른 호스트를 넣으면 그 id에 저장된 SSH 비밀 값이 그 호스트로 간다.
+ */
 export function sharedSshConfigs(): SharedSshConfig[] {
-  return vscode.workspace.getConfiguration('bindb').get<SharedSshConfig[]>('ssh.configurations', []);
+  return vscode.workspace.getConfiguration('bindb').inspect<SharedSshConfig[]>('ssh.configurations')?.globalValue ?? [];
+}
+
+/** SSH keyboard-interactive: 서버가 묻는 것(OTP · PAM 질문)을 하나씩 묻는다. 하나라도 취소하면 undefined */
+export async function askKeyboard(title: string, prompts: { prompt: string; echo: boolean }[]): Promise<string[] | undefined> {
+  const answers: string[] = [];
+  for (const p of prompts) {
+    const a = await vscode.window.showInputBox({ title, prompt: p.prompt.trim(), password: !p.echo, ignoreFocusOut: true });
+    if (a === undefined) return undefined;
+    answers.push(a);
+  }
+  return answers;
 }
 
 /** Strict host key checking · Ask: 처음 보는 호스트 키를 믿을지 묻는다 */

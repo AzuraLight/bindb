@@ -89,7 +89,7 @@ export class ResultPanel implements vscode.Disposable {
     const built = withCodeStyle(base.cfg.codeStyle, () =>
       base.source
         ? buildFilteredSql({ table: base.source.quoted, select: base.source.select }, base, kw, base.cfg.driver)
-        : buildFilteredSql({ query: base.query! }, base, kw, base.cfg.driver),
+        : buildFilteredSql({ query: base.query!, columns: this.current?.columns }, base, kw, base.cfg.driver),
     );
     const qid = `q${++this.seq}`;
     // 필터가 거부돼도 이 실행을 "지금 것"으로 삼는다 — 웹뷰가 이 qid로 고친 필터를 다시 보낸다
@@ -158,7 +158,9 @@ export class ResultPanel implements vscode.Disposable {
     if (!s.key.length) return { editable: false, reason: `${s.table.name} has no primary key, so rows cannot be identified.` };
     const missing = s.key.find((k) => !cur.columns.includes(k));
     if (missing) return { editable: false, reason: `The key column ${missing} is not in the result.` };
-    return { editable: true, key: s.key, columns: cur.columns.map((c) => s.realColumns.has(c) && c !== 'rowid') };
+    // H2 배열은 H2가 주는 글자([a, b])로 보인다. 그 글자를 다시 보내면 원소 하나짜리 배열 [[a, b]]이 된다 — 편집하지 않는다
+    const arrays = new Set(cur.cfg.driver === 'h2' ? s.table.columns.filter((c) => /ARRAY/i.test(c.type ?? '')).map((c) => c.name) : []);
+    return { editable: true, key: s.key, columns: cur.columns.map((c) => s.realColumns.has(c) && c !== 'rowid' && !arrays.has(c)) };
   }
 
   private async record(cur: Current, extra: { rows?: number; error?: string }): Promise<void> {

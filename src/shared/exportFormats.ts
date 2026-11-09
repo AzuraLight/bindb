@@ -106,7 +106,12 @@ export function quoteIdent(dialect: SqlDialect, name: string): string {
   return q + name.split(q).join(q + q) + q;
 }
 
-/** SQL 리터럴. MySQL은 기본 설정에서 \ 가 이스케이프 문자라 두 번 쓴다 */
+/**
+ * SQL 리터럴.
+ * MySQL에서 \ 의 뜻은 sql_mode에 달렸다: 기본은 이스케이프 문자, NO_BACKSLASH_ESCAPES면 글자 그대로
+ * (https://dev.mysql.com/doc/refman/8.0/en/string-literals.html). 어느 쪽에서 실행해도 같은 값이 되도록
+ * \ 가 든 문자열은 UTF-8 16진 문자열(_utf8mb4 X'…')로 쓴다. 나머지는 '' 만 쓰면 두 모드에서 같다.
+ */
 export function sqlLiteral(dialect: SqlDialect, v: ExportCell): string {
   if (v === null) return 'NULL';
   if (typeof v === 'number') return Number.isFinite(v) ? String(v) : `'${v}'`;
@@ -115,9 +120,11 @@ export function sqlLiteral(dialect: SqlDialect, v: ExportCell): string {
     if (v.hex === undefined) return 'NULL /* binary not loaded */';
     return dialect === 'postgres' ? `'\\x${v.hex}'::bytea` : `X'${v.hex}'`;
   }
-  let s = v.replace(/'/g, "''");
-  if (dialect === 'mysql') s = s.replace(/\\/g, '\\\\');
-  return `'${s}'`;
+  if (dialect === 'mysql' && v.includes('\\')) {
+    const hex = Array.from(new TextEncoder().encode(v), (b) => b.toString(16).padStart(2, '0')).join('');
+    return `_utf8mb4 X'${hex}'`;
+  }
+  return `'${v.replace(/'/g, "''")}'`;
 }
 
 function sqlInsert(opts: ExportOptions): RowWriter {

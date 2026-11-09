@@ -118,4 +118,58 @@ describe('SQLite PRAGMA and BEGIN forms', () => {
     }
     for (const sql of ['PRAGMA optimize', 'PRAGMA incremental_vacuum', 'PRAGMA wal_checkpoint(TRUNCATE)']) assert.equal(kind(sql, 'sqlite'), 'write', sql);
   });
+
+  // 괄호로 시작하는 문장이 empty로 판정되어 읽기 전용 검사(kind === 'write'일 때만 거부)를 건너뛰었다
+  it('looks inside leading parentheses instead of calling the statement empty', () => {
+    for (const [sql, d] of [
+      ["(SELECT GET_LOCK('k', 1))", 'mysql'],
+      ['(SELECT 1 FROM t FOR UPDATE)', 'mysql'],
+      ['(  ( SELECT SLEEP(0) ) )', 'mysql'],
+      ["(SELECT CSVWRITE('/tmp/y', 'SELECT 1'))", 'h2'],
+      ['(SELECT "FILE_WRITE"(\'x\', \'/tmp/y\'))', 'h2'],
+      ["(SELECT nextval('s'))", 'postgres'],
+      ["((SELECT writefile('/tmp/y', 'x')))", 'sqlite'],
+      ['(DELETE FROM t)', 'postgres'],
+    ] as const) assert.equal(kind(sql, d), 'write', sql);
+    assert.equal(kind('(SELECT 1) UNION (SELECT 2) ORDER BY 1'), 'read');
+    assert.equal(kind('((VALUES (1)))'), 'read');
+  });
+
+  it('treats statements that do not start with a keyword as writes', () => {
+    for (const sql of ['$1', ':x', '42', "'text'"]) assert.equal(kind(sql), 'write', sql);
+    assert.equal(kind('-- only a comment'), 'empty');
+    assert.equal(kind(''), 'empty');
+  });
+
+  // 열 이름이 키워드와 같으면(copy · load · handler · do …) 읽기 전용 연결에서 거부됐다
+  it('columns named like write keywords are reads; real writes inside reads still are not', () => {
+    for (const [sql, d] of [
+      ['SELECT copy, load, handler FROM t', 'postgres'],
+      ['SELECT t.copy FROM t ORDER BY create DESC', 'postgres'],
+      ['SELECT a FROM t WHERE do = 1 AND merge IS NULL', 'mysql'],
+      ['SELECT DISTINCT replace FROM t', 'mysql'],
+    ] as const) assert.equal(kind(sql, d), 'read', sql);
+    for (const [sql, d] of [
+      ['WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d', 'postgres'],
+      ['WITH a AS (SELECT 1), b AS (INSERT INTO t VALUES (1) RETURNING *) SELECT * FROM b', 'postgres'],
+      ['WITH x AS (SELECT 1) UPDATE t SET a = 1', 'postgres'],
+      ['EXPLAIN ANALYZE DELETE FROM t', 'postgres'],
+      ['EXPLAIN UPDATE t SET a = 1', 'mysql'],
+      ['SELECT * FROM FINAL TABLE (INSERT INTO t VALUES (1))', 'h2'],
+      ['SELECT * FROM t WHERE a = (DELETE FROM t RETURNING a)', 'postgres'],
+    ] as const) assert.equal(kind(sql, d), 'write', sql);
+  });
+
+  it('PostgreSQL functions that lock, reset statistics or reach other servers are writes', () => {
+    for (const fn of [
+      'pg_try_advisory_lock(1)',
+      'pg_advisory_lock_shared(1)',
+      'pg_try_advisory_xact_lock(1)',
+      'pg_stat_reset()',
+      "dblink_connect('host=x')",
+      "pg_create_logical_replication_slot('s', 'pgoutput')",
+      "pg_drop_replication_slot('s')",
+      "lo_from_bytea(0, 'x')",
+    ]) assert.equal(kind(`SELECT ${fn}`), 'write', fn);
+  });
 });

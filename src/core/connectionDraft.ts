@@ -231,7 +231,7 @@ export const DRIVER_LABELS: Record<DriverId, string> = {
   h2: 'H2',
 };
 
-export const DEFAULT_PORT: Partial<Record<DriverId, number>> = { postgres: 5432, mysql: 3306, h2: 5435 };
+export const DEFAULT_PORT: Partial<Record<DriverId, number>> = { postgres: 5432, mysql: 3306, h2: 9092 };
 export const DEFAULT_USER: Partial<Record<DriverId, string>> = { postgres: 'postgres', mysql: 'root', h2: 'sa' };
 export const DEFAULT_TIMEOUT_SECONDS = 10;
 
@@ -345,7 +345,7 @@ export function buildConfig(form: ConnectionForm, others: readonly { name: strin
   } else if (f.file) {
     const file = form.file.trim();
     if (!file) errors.file = 'Choose a database file.';
-    else if (form.driver === 'h2' && !/\.mv\.db$/i.test(file)) errors.file = 'Choose an H2 .mv.db file.';
+    else if (form.driver === 'h2' && !/\.(mv|h2)\.db$/i.test(file)) errors.file = 'Choose an H2 .mv.db (or 1.4 .h2.db) file.';
     config.file = file;
   } else {
     const host = form.host.trim();
@@ -393,6 +393,23 @@ export function hasUrl(form: ConnectionForm): boolean {
 }
 
 /** 폼 → 연결 URL(비밀번호는 넣지 않는다) */
+/** URL의 sslmode(libpq) · ssl-mode(MySQL) ↔ BindB SSL 모드. allow(평문 먼저, 안 되면 SSL)는 둘 다 시도하는 prefer로 */
+const PG_SSLMODE: Record<Exclude<SslMode, 'disable'>, string> = { prefer: 'prefer', require: 'require', 'verify-ca': 'verify-ca', verify: 'verify-full' };
+const MYSQL_SSLMODE: Record<Exclude<SslMode, 'disable'>, string> = { prefer: 'PREFERRED', require: 'REQUIRED', 'verify-ca': 'VERIFY_CA', verify: 'VERIFY_IDENTITY' };
+const SSLMODE_FROM_URL: Record<string, SslMode> = {
+  disable: 'disable',
+  disabled: 'disable',
+  allow: 'prefer',
+  prefer: 'prefer',
+  preferred: 'prefer',
+  require: 'require',
+  required: 'require',
+  'verify-ca': 'verify-ca',
+  verify_ca: 'verify-ca',
+  'verify-full': 'verify',
+  verify_identity: 'verify',
+};
+
 export function toUrl(form: ConnectionForm): string {
   const scheme = form.driver === 'mysql' ? 'mysql' : 'postgresql';
   const user = form.user.trim() ? `${encodeURIComponent(form.user.trim())}@` : '';
@@ -400,11 +417,11 @@ export function toUrl(form: ConnectionForm): string {
   const port = form.port.trim() || String(DEFAULT_PORT[form.driver] ?? '');
   const db = form.database.trim() ? `/${encodeURIComponent(form.database.trim())}` : '';
   const ssl =
-    form.driver === 'postgres' && form.ssl !== 'disable'
-      ? `?sslmode=${form.ssl === 'verify' ? 'verify-full' : 'require'}`
-      : form.driver === 'mysql' && form.ssl !== 'disable'
-        ? `?ssl-mode=${form.ssl === 'verify' ? 'VERIFY_IDENTITY' : 'REQUIRED'}`
-        : '';
+    form.ssl === 'disable' || (form.driver !== 'postgres' && form.driver !== 'mysql')
+      ? ''
+      : form.driver === 'postgres'
+        ? `?sslmode=${PG_SSLMODE[form.ssl]}`
+        : `?ssl-mode=${MYSQL_SSLMODE[form.ssl]}`;
   return `${scheme}://${user}${host}${port ? `:${port}` : ''}${db}${ssl}`;
 }
 
@@ -439,9 +456,7 @@ export function parseUrl(text: string, driver: DriverId): ParsedUrl {
   patch.database = decodeURIComponent(url.pathname.replace(/^\//, ''));
   if (url.username) patch.user = decodeURIComponent(url.username);
   const mode = (url.searchParams.get('sslmode') ?? url.searchParams.get('ssl-mode') ?? '').toLowerCase();
-  if (mode) {
-    patch.ssl = /verify/.test(mode) ? 'verify' : /^(require|required|prefer|preferred)$/.test(mode) ? 'require' : 'disable';
-  }
+  if (mode) patch.ssl = SSLMODE_FROM_URL[mode] ?? 'disable';
   return { ok: true, patch, password: url.password ? decodeURIComponent(url.password) : undefined };
 }
 

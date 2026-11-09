@@ -1,13 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import type { ConnectionConfig } from '../drivers';
+import { PREFIX, secretKey, type SecretKind } from './secretKeys';
+
+export { secretKey, workspaceKey, type SecretKind } from './secretKeys';
 
 const SETTING = 'connections';
-
-/** 비밀 값 종류: DB 비밀번호 · SSL 클라이언트 키 비밀번호 · SSH 비밀번호(또는 키 암호) */
-export type SecretKind = 'password' | 'sslKey' | 'ssh';
-const PREFIX: Record<SecretKind, string> = { password: 'bindb.pw', sslKey: 'bindb.sslkey', ssh: 'bindb.ssh' };
-const secretKey = (kind: SecretKind, id: string) => `${PREFIX[kind]}.${id}`;
 
 /** 비밀 값 바꾸기: 문자열 = 새로 저장, null = 지움, undefined = 그대로 둠 */
 export type SecretUpdate = Partial<Record<SecretKind, string | null>>;
@@ -29,10 +27,21 @@ export class ConnectionStore implements vscode.Disposable {
   /** restart · session 보관 비밀번호 */
   private readonly memory = new Map<string, string>();
 
-  constructor(private readonly secrets: vscode.SecretStorage) {
+  /**
+   * @param workspace 프로젝트 연결의 비밀 값을 나눌 작업 공간 이름(workspaceKey). 없으면 프로젝트 연결을 둘 수 없다
+   */
+  constructor(
+    private readonly secrets: vscode.SecretStorage,
+    private readonly workspace?: string,
+  ) {
     this.sub = vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration(`bindb.${SETTING}`)) this.changed.fire();
     });
+  }
+
+  /** owner(연결 id 또는 공유 SSH 설정 id)의 비밀 값 키. 프로젝트 연결이면 작업 공간별 */
+  private keyOf(kind: SecretKind, owner: string, scope = this.get(owner)?.scope): string {
+    return secretKey(kind, owner, scope === 'project' ? (this.workspace ?? 'none') : undefined);
   }
 
   private read(target: 'global' | 'project'): ConnectionConfig[] {
@@ -41,9 +50,14 @@ export class ConnectionStore implements vscode.Disposable {
     return list.map((c) => (target === 'project' ? { ...c, scope: 'project' as const } : { ...c, scope: undefined }));
   }
 
-  /** 전역 연결 다음에 프로젝트 연결 */
+  /**
+   * 전역 연결 다음에 프로젝트 연결. 전역 연결과 id가 같은 프로젝트 연결은 뺀다 —
+   * 같은 id면 세션 · 메모리 비밀번호가 섞이고, 일부러 맞춘 id일 수 있다.
+   */
   list(): ConnectionConfig[] {
-    return [...this.read('global'), ...this.read('project')];
+    const global = this.read('global');
+    const ids = new Set(global.map((c) => c.id));
+    return [...global, ...this.read('project').filter((c) => !ids.has(c.id))];
   }
 
   get(id: string): ConnectionConfig | undefined {
@@ -73,19 +87,31 @@ export class ConnectionStore implements vscode.Disposable {
     const full: ConnectionConfig = { id, ...cfg };
     const target = full.scope === 'project' ? 'project' : 'global';
     const other = target === 'project' ? 'global' : 'project';
+    const before = this.get(id)?.scope ?? 'global';
     if (this.read(other).some((c) => c.id === id)) await this.write(other, this.read(other).filter((c) => c.id !== id));
     const mine = this.read(target);
     await this.write(target, mine.some((c) => c.id === id) ? mine.map((c) => (c.id === id ? full : c)) : [...mine, full]);
+    // 범위를 옮기면(Make Global · Move to Project) 비밀 값도 그 범위의 키로 옮긴다
+    if (before !== target) {
+      for (const kind of Object.keys(PREFIX) as SecretKind[]) {
+        if (kind === 'ssh' && full.ssh?.configId) continue;
+        const from = this.keyOf(kind, id, before);
+        const value = await this.secrets.get(from);
+        if (value !== undefined && secrets[kind] === undefined) await this.secrets.store(this.keyOf(kind, id, target), value);
+        await this.secrets.delete(from);
+      }
+    }
     await this.updateSecrets(full, secrets);
     return full;
   }
 
   async remove(id: string): Promise<void> {
+    const scope = this.get(id)?.scope;
     for (const target of ['global', 'project'] as const) {
       const list = this.read(target);
       if (list.some((c) => c.id === id)) await this.write(target, list.filter((c) => c.id !== id));
     }
-    for (const kind of Object.keys(PREFIX) as SecretKind[]) await this.secrets.delete(secretKey(kind, id));
+    for (const kind of Object.keys(PREFIX) as SecretKind[]) await this.secrets.delete(this.keyOf(kind, id, scope));
     this.memory.delete(id);
   }
 
@@ -93,7 +119,7 @@ export class ConnectionStore implements vscode.Disposable {
   async password(id: string): Promise<string | undefined> {
     const cfg = this.get(id);
     const save = cfg?.passwordSave ?? 'forever';
-    if (save === 'forever') return this.secrets.get(secretKey('password', id));
+    if (save === 'forever') return this.secrets.get(this.keyOf('password', id));
     return this.memory.get(id);
   }
 
@@ -108,29 +134,31 @@ export class ConnectionStore implements vscode.Disposable {
     if (cfg.passwordSave === 'session') this.memory.delete(cfg.id);
   }
 
+  /** id: 연결 id 또는 공유 SSH 설정 id(전역 키) */
   secret(kind: Exclude<SecretKind, 'password'>, id: string): Thenable<string | undefined> {
-    return this.secrets.get(secretKey(kind, id));
+    return this.secrets.get(this.keyOf(kind, id));
   }
 
   private async updateSecrets(cfg: ConnectionConfig, update: SecretUpdate): Promise<void> {
+    const scope = cfg.scope === 'project' ? 'project' : 'global';
     for (const kind of Object.keys(update) as SecretKind[]) {
       const value = update[kind];
       if (value === undefined) continue;
       if (kind === 'password' && (cfg.passwordSave ?? 'forever') !== 'forever') {
         // 키체인에 두지 않는 방식: 키체인 값은 지우고, 새 값은 메모리에만
-        await this.secrets.delete(secretKey('password', cfg.id));
+        await this.secrets.delete(this.keyOf('password', cfg.id, scope));
         if (value) this.remember(cfg, value);
         else this.memory.delete(cfg.id);
         continue;
       }
-      // SSH 비밀 값은 공유 설정을 쓰면 그 설정 id에 둔다
-      const owner = kind === 'ssh' ? (cfg.ssh?.configId ?? cfg.id) : cfg.id;
-      if (value === null) await this.secrets.delete(secretKey(kind, owner));
-      else if (value) await this.secrets.store(secretKey(kind, owner), value);
+      // SSH 비밀 값은 공유 설정을 쓰면 그 설정 id(전역)에 둔다
+      const key = kind === 'ssh' && cfg.ssh?.configId ? this.keyOf('ssh', cfg.ssh.configId, 'global') : this.keyOf(kind, cfg.id, scope);
+      if (value === null) await this.secrets.delete(key);
+      else if (value) await this.secrets.store(key, value);
     }
     // 보관 방식을 forever에서 바꿨으면 키체인에 남은 비밀번호를 지운다
     if ((cfg.passwordSave ?? 'forever') !== 'forever' && update.password === undefined) {
-      await this.secrets.delete(secretKey('password', cfg.id));
+      await this.secrets.delete(this.keyOf('password', cfg.id, scope));
     }
   }
 

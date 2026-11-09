@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import * as vscode from 'vscode';
 import { buildConfig, formFromConfig, type ConnectionForm, type FormErrors } from '../core/connectionDraft';
 import type { ConnectionStore } from '../core/connections';
-import { askHostKey, setupStatements, sharedSshConfigs } from '../core/sessions';
+import { askHostKey, askKeyboard, setupStatements, sharedSshConfigs } from '../core/sessions';
 import { resolveSharedSsh } from '../drivers/common';
 import type { SharedSshConfig } from '../drivers/types';
 import { downloadH2, h2Versions } from '../drivers/h2Download';
@@ -213,8 +213,8 @@ export class ConnectionPanel {
       password = await vscode.window.showInputBox({ prompt: `Password for ${form.name || 'this connection'}`, password: true });
       if (password === undefined) return undefined;
     }
-    if (form.driver === 'h2' && form.h2Mode === 'file' && !h2Jar.trim()) {
-      report('Choose the h2-*.jar file to open H2 database files.');
+    if (form.driver === 'h2' && !h2Jar.trim()) {
+      report('Choose the h2-*.jar driver file to connect to H2.');
       return undefined;
     }
     const started = Date.now();
@@ -223,6 +223,7 @@ export class ConnectionPanel {
       cfg = resolveSharedSsh(cfg, sshConfigs);
       const session = await connectDriver(drivers[form.driver], cfg, {
         askHostKey,
+        askKeyboard,
         password,
         h2Jar: h2Jar.trim() || undefined,
         sslKeyPassword: await this.resolveSecret(id, 'sslKey', secrets.sslKey),
@@ -300,7 +301,7 @@ export class ConnectionPanel {
     const result: Applied = { added: [], updated: [], removed: [] };
     const idOf = new Map<string, string>();
     try {
-      if (changes.some((c) => c.form.driver === 'h2' && c.form.h2Mode === 'file') && h2Jar.trim()) {
+      if (changes.some((c) => c.form.driver === 'h2') && h2Jar.trim()) {
         const config = vscode.workspace.getConfiguration('bindb');
         if (config.get<string>('h2.jarPath') !== h2Jar.trim()) {
           await config.update('h2.jarPath', h2Jar.trim(), vscode.ConfigurationTarget.Global);

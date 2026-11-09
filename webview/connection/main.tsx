@@ -384,7 +384,7 @@ function App() {
     const others = drafts.filter((o) => o !== d).map((o) => effective(o));
     const r = buildConfig(form, others);
     if (!r.ok) for (const msg of Object.values(r.errors)) problems.push({ key: d.key, name: form.name || 'Untitled', message: msg! });
-    if (form.driver === 'h2' && form.h2Mode === 'file' && !h2Jar.trim()) problems.push({ key: d.key, name: form.name, message: 'The H2 jar (driver file) is not set.' });
+    if (form.driver === 'h2' && !h2Jar.trim()) problems.push({ key: d.key, name: form.name, message: 'The H2 jar (driver file) is not set.' });
   }
 
   const apply = (close: boolean) => {

@@ -25,6 +25,17 @@ describe('grid filter and sort', () => {
     assert.match(String(checkFragment('(a = 1', 'WHERE')), /parentheses/);
     assert.match(String(checkFragment('a = 1)', 'WHERE')), /parentheses/);
     assert.equal(checkFragment("note = 'a;b' AND x IN (1, 2)", 'WHERE'), undefined, 'a ; inside a string is fine');
+    // 줄 주석은 DB마다 다르다: # (mysql) · // (h2)
+    assert.match(String(checkFragment('a = 1 # rest', 'WHERE', 'mysql')), /line comments/);
+    assert.match(String(checkFragment('a = 1 // rest', 'WHERE', 'h2')), /line comments/);
+    assert.equal(checkFragment('a = 1 /* note */', 'WHERE', 'mysql'), undefined);
+    assert.equal(checkFragment('a # 1 = 0', 'WHERE', 'postgres'), undefined, '# is XOR in PostgreSQL');
+  });
+
+  it('wraps queries that start with a parenthesis', () => {
+    assert.ok(isWrappable('(SELECT 1) UNION (SELECT 2)', 'postgres'));
+    const r = buildFilteredSql({ query: '(SELECT 1 AS a) UNION (SELECT 2)' }, { orderBy: '1 DESC' }, undefined, 'postgres');
+    assert.deepEqual(r, { ok: true, sql: 'SELECT * FROM (\n(SELECT 1 AS a) UNION (SELECT 2)\n) bindb_q\nORDER BY 1 DESC' });
   });
 
   it('header sort cycles none → asc → desc → none, shift keeps other keys; order by position', () => {

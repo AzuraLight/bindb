@@ -106,3 +106,88 @@ describe('SSH tunnel', () => {
     await t.close();
   });
 });
+
+/**
+ * 인증 방식을 고르는 두 번째 SSH 서버.
+ *  - key: goodKey 공개키만 받는다
+ *  - otp: goodKey 다음에 keyboard-interactive로 인증 코드 123456을 요구한다(부분 성공)
+ *  - kbd: password 방식은 거절하고 keyboard-interactive의 "Password:"로 sesame를 받는다
+ */
+describe('SSH authentication methods', () => {
+  let port = 0;
+  const good = utils.generateKeyPairSync('ed25519');
+  const bad = utils.generateKeyPairSync('ed25519');
+  const goodPub = utils.parseKey(good.public) as ReturnType<typeof utils.parseKey> & { getPublicSSH(): Buffer; verify(d: Buffer, s: Buffer, h?: string): boolean; type: string };
+  writeFileSync(path.join(dir, 'id_bad'), bad.private);
+  writeFileSync(path.join(dir, 'id_good'), good.private);
+
+  before(async () => {
+    const hostKey = utils.generateKeyPairSync('ed25519').private;
+    const server = new Server({ hostKeys: [hostKey] }, (client) => {
+      client.on('authentication', (ctx) => {
+        if (ctx.method === 'publickey' && (ctx.username === 'key' || ctx.username === 'otp')) {
+          if (ctx.key.algo !== goodPub.type || !ctx.key.data.equals(goodPub.getPublicSSH())) return ctx.reject();
+          if (!ctx.signature) return ctx.accept(); // 이 키를 쓸 수 있는지 묻는 단계
+          if (goodPub.verify(ctx.blob!, ctx.signature, ctx.hashAlgo) !== true) return ctx.reject();
+          return ctx.username === 'otp' ? ctx.reject(['keyboard-interactive'], true) : ctx.accept();
+        }
+        if (ctx.method === 'keyboard-interactive' && ctx.username === 'otp') {
+          return ctx.prompt([{ prompt: 'Verification code: ', echo: true }], (a) => (a[0] === '123456' ? ctx.accept() : ctx.reject()));
+        }
+        if (ctx.method === 'keyboard-interactive' && ctx.username === 'kbd') {
+          return ctx.prompt([{ prompt: 'Password: ', echo: false }], (a) => (a[0] === 'sesame' ? ctx.accept() : ctx.reject()));
+        }
+        return ctx.reject(ctx.username === 'kbd' ? ['keyboard-interactive'] : ['publickey']);
+      });
+      client.on('ready', () => {
+        client.on('tcpip', (accept, _reject, info) => {
+          const stream = accept();
+          const out = createConnection(info.destPort, info.destIP);
+          stream.pipe(out).pipe(stream);
+        });
+      });
+      client.on('error', () => {});
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+    port = (server.address() as AddressInfo).port;
+    closers.push(() => server.close());
+  });
+
+  const via = (user: string, auth: 'key' | 'password', extra: object = {}): ConnectionConfig => ({
+    ...cfg(),
+    ssh: { enabled: true, host: '127.0.0.1', port, user, auth, strictHostKey: 'no', ...extra },
+  });
+  const config = (name: string, text: string) => {
+    const file = path.join(dir, name);
+    writeFileSync(file, text);
+    return file;
+  };
+
+  it('tries every IdentityFile from ~/.ssh/config in order', async () => {
+    const sshConfigFile = config('cfg-keys', `Host db-alias\n  HostName 127.0.0.1\n  Port ${port}\n  IdentityFile ${path.join(dir, 'id_bad')}\n  IdentityFile ${path.join(dir, 'id_good')}\n`);
+    const t = await openTunnel(via('key', 'key', { host: 'db-alias', port: 22, parseConfig: true }), target(), undefined, { sshConfigFile });
+    assert.equal(await roundTrip(t.localPort, 'two keys'), 'two keys');
+    await t.close();
+  });
+
+  it('asks for a one-time code after the key (keyboard-interactive, partial success)', async () => {
+    const asked: string[] = [];
+    const t = await openTunnel(via('otp', 'key', { keyFile: path.join(dir, 'id_good') }), target(), undefined, {
+      askKeyboard: async (_title, prompts) => (asked.push(...prompts.map((p) => p.prompt)), ['123456']),
+    });
+    assert.equal(await roundTrip(t.localPort, 'otp'), 'otp');
+    await t.close();
+    assert.deepEqual(asked, ['Verification code: ']);
+  });
+
+  it('answers a keyboard-interactive password prompt with the saved password', async () => {
+    const t = await openTunnel(via('kbd', 'password'), target(), 'sesame', { askKeyboard: async () => assert.fail('should not ask') });
+    assert.equal(await roundTrip(t.localPort, 'kbd'), 'kbd');
+    await t.close();
+  });
+
+  it('refuses hosts that need ProxyJump instead of connecting directly', async () => {
+    const sshConfigFile = config('cfg-jump', `Host inner\n  HostName 127.0.0.1\n  Port ${port}\n  ProxyJump bastion\n`);
+    await assert.rejects(openTunnel(via('key', 'key', { host: 'inner', parseConfig: true }), target(), undefined, { sshConfigFile }), /ProxyJump \(bastion\)/);
+  });
+});

@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { ConnectionStore } from './core/connections';
+import { ConnectionStore, workspaceKey } from './core/connections';
 import { SessionManager } from './core/sessions';
 import { drivers, type ConnectionConfig, type DriverId } from './drivers';
 import { SqlCompletionProvider } from './language/completion';
@@ -34,7 +34,8 @@ export interface BindbTestApi {
 }
 
 export function activate(context: vscode.ExtensionContext): BindbTestApi {
-  const store = new ConnectionStore(context.secrets);
+  // 프로젝트 연결의 비밀 값은 작업 공간마다 따로 둔다(.code-workspace 파일 또는 첫 폴더)
+  const store = new ConnectionStore(context.secrets, workspaceKey(vscode.workspace.workspaceFile ?? vscode.workspace.workspaceFolders?.[0]?.uri));
   const sessions = new SessionManager(store);
   const history = new HistoryStore(vscode.Uri.joinPath(context.globalStorageUri, 'history.json').fsPath);
   const results = new ResultPanel(context.extensionUri, sessions, history);

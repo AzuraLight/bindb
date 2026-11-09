@@ -66,8 +66,11 @@ describe('SQL INSERT', () => {
     );
     assert.equal(
       formatRows('sql-insert', c, rows, { dialect: 'mysql' }),
-      "INSERT INTO MY_TABLE (`id`, `na\"me`, `n`, `ok`, `blob`, `path`) VALUES (1, 'O''Brien', NULL, TRUE, X'00ff', 'a\\\\b');\n",
+      // \ 가 든 문자열은 sql_mode(NO_BACKSLASH_ESCAPES)와 상관없이 같은 값이 되도록 16진으로
+      "INSERT INTO MY_TABLE (`id`, `na\"me`, `n`, `ok`, `blob`, `path`) VALUES (1, 'O''Brien', NULL, TRUE, X'00ff', _utf8mb4 X'615c62');\n",
     );
+    assert.equal(sqlLiteral('mysql', "it's ü"), "'it''s ü'");
+    assert.equal(sqlLiteral('mysql', 'ü\\'), "_utf8mb4 X'c3bc5c'");
     assert.match(formatRows('sql-insert', ['ok'], [[false]], { dialect: 'sqlite' }), /VALUES \(0\);/);
   });
 

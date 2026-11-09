@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { appendFile, mkdir, readFile } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -18,24 +18,56 @@ export interface Tunnel {
   close(): Promise<void>;
 }
 
+/** IdentityFile이 없을 때 OpenSSH가 시도하는 기본 키(ssh(1) -i) */
+const DEFAULT_KEYS = ['id_ed25519', 'id_ecdsa', 'id_rsa'];
+
+/** Include 패턴(~/.ssh 기준 상대 경로, 파일 이름의 * · ? 글롭) → 파일 내용들(이름순) */
+function includeFiles(base: string, pattern: string): string[] {
+  const full = path.isAbsolute(pattern) ? pattern : path.join(base, pattern);
+  const dir = path.dirname(full);
+  const name = path.basename(full);
+  if (!/[*?]/.test(name)) return existsSync(full) ? [readFileSync(full, 'utf8')] : [];
+  const re = new RegExp(`^${name.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')}$`);
+  try {
+    return readdirSync(dir)
+      .filter((f) => re.test(f))
+      .sort()
+      .map((f) => readFileSync(path.join(dir, f), 'utf8'));
+  } catch {
+    return [];
+  }
+}
+
 export async function openTunnel(
   cfg: ConnectionConfig,
   target: { host: string; port: number },
   sshSecret: string | undefined,
-  opts: Pick<ConnectOptions, 'askHostKey' | 'knownHostsFile' | 'sshConfigFile'> = {},
+  opts: Pick<ConnectOptions, 'askHostKey' | 'askKeyboard' | 'knownHostsFile' | 'sshConfigFile'> = {},
 ): Promise<Tunnel> {
   const ssh = { ...cfg.ssh! };
+  let configKeys: string[] = [];
   // Parse config file ~/.ssh/config: 비어 있는 값만 채운다
   if (ssh.parseConfig) {
-    const text = await readFile(opts.sshConfigFile ?? path.join(os.homedir(), '.ssh', 'config'), 'utf8').catch(() => '');
-    const e = resolveSshConfig(text, ssh.host, os.homedir());
+    const configFile = opts.sshConfigFile ?? path.join(os.homedir(), '.ssh', 'config');
+    const text = await readFile(configFile, 'utf8').catch(() => '');
+    const e = resolveSshConfig(text, ssh.host, {
+      home: os.homedir(),
+      localUser: os.userInfo().username,
+      include: (p) => includeFiles(path.dirname(configFile), p),
+    });
+    // 점프 호스트를 거쳐야 하는 서버에 바로 붙으면 엉뚱한 곳에 붙거나 기다리다 실패한다 — 분명히 알린다
+    if (e.proxyJump || e.proxyCommand) {
+      throw new Error(`SSH: ~/.ssh/config gives ${ssh.host} a ${e.proxyJump ? `ProxyJump (${e.proxyJump})` : 'ProxyCommand'}, which BindB does not support yet.`);
+    }
     if (e.user && !ssh.user) ssh.user = e.user;
     if (e.port && (!ssh.port || ssh.port === 22)) ssh.port = e.port;
-    if (e.identityFile && ssh.auth === 'key' && !ssh.keyFile) ssh.keyFile = e.identityFile;
+    configKeys = e.identityFiles;
     if (e.hostName) ssh.host = e.hostName;
   }
   const sshPort = ssh.port ?? 22;
   const knownFile = opts.knownHostsFile ?? path.join(os.homedir(), '.ssh', 'known_hosts');
+  // 시스템 known_hosts도 본다(새 키는 사용자 파일에만 적는다)
+  const knownFiles = opts.knownHostsFile ? [knownFile] : [knownFile, '/etc/ssh/ssh_known_hosts'];
   const mode = ssh.strictHostKey ?? 'ask';
   let rejectReason: string | undefined;
   const conn = new Client();
@@ -50,9 +82,13 @@ export async function openTunnel(
     hostVerifier: ((key: Buffer, verify: (ok: boolean) => void) => {
       if (mode === 'no') return verify(true);
       void (async () => {
-        const known = await readFile(knownFile, 'utf8').catch(() => '');
+        const known = (await Promise.all(knownFiles.map((f) => readFile(f, 'utf8').catch(() => '')))).join('\n');
         const status = checkKnownHost(known, ssh.host, sshPort, key);
         if (status === 'known') return true;
+        if (status === 'revoked') {
+          rejectReason = `The host key of ${hostPattern(ssh.host, sshPort)} (${fingerprint(key)}) is marked @revoked in known_hosts.`;
+          return false;
+        }
         if (status === 'changed') {
           rejectReason = `The host key of ${hostPattern(ssh.host, sshPort)} changed (${fingerprint(key)}). It does not match ${knownFile}.`;
           return false;
@@ -71,15 +107,7 @@ export async function openTunnel(
       })().then(verify, () => verify(false));
     }) as unknown as ConnectConfig['hostVerifier'],
   };
-  if (ssh.auth === 'password') config.password = sshSecret;
-  else if (ssh.auth === 'key') {
-    config.privateKey = readFileSync(resolvePath(cfg, ssh.keyFile ?? ''));
-    if (sshSecret) config.passphrase = sshSecret;
-  } else {
-    // OpenSSH agent
-    config.agent = process.env.SSH_AUTH_SOCK;
-    if (!config.agent) throw new Error('SSH agent is not available (SSH_AUTH_SOCK is not set).');
-  }
+  config.authHandler = authAttempts(cfg, ssh, configKeys, sshSecret, opts.askKeyboard) as ConnectConfig['authHandler'];
 
   await new Promise<void>((resolve, reject) => {
     conn.once('ready', () => resolve());
@@ -127,6 +155,55 @@ export async function openTunnel(
         conn.end();
       }),
   };
+}
+
+/**
+ * 인증 시도 순서(ssh2 authHandler). 앞의 것이 실패하면 다음 것을 시도한다.
+ *  - password: 비밀번호 → keyboard-interactive
+ *  - key: 지정한 키 파일 하나. 없으면 ~/.ssh/config의 IdentityFile들, 그것도 없으면 기본 키(id_ed25519 · id_ecdsa · id_rsa) →
+ *    keyboard-interactive(공개키 뒤에 2FA를 요구하는 서버)
+ *  - agent: SSH_AUTH_SOCK, Windows에서는 OpenSSH 에이전트 파이프 → keyboard-interactive
+ * keyboard-interactive: 비밀번호를 묻는 것이면 저장된 비밀번호로 답하고, 그 밖의 질문(OTP 등)은 사용자에게 묻는다.
+ */
+function authAttempts(
+  cfg: ConnectionConfig,
+  ssh: NonNullable<ConnectionConfig['ssh']>,
+  configKeys: string[],
+  secret: string | undefined,
+  askKeyboard: ConnectOptions['askKeyboard'],
+): (methodsLeft: string[] | null, partial: boolean | null, next: (attempt: object | false) => void) => void {
+  const username = ssh.user;
+  const attempts: object[] = [];
+  if (ssh.auth === 'password') {
+    attempts.push({ type: 'password', username, password: secret ?? '' });
+  } else if (ssh.auth === 'key') {
+    let files: string[];
+    if (ssh.keyFile) {
+      const file = resolvePath(cfg, ssh.keyFile);
+      if (!existsSync(file)) throw new Error(`SSH key file not found: ${file}`);
+      files = [file];
+    } else {
+      const candidates = configKeys.length ? configKeys : DEFAULT_KEYS.map((k) => path.join(os.homedir(), '.ssh', k));
+      files = candidates.filter((f) => existsSync(f));
+      if (!files.length) throw new Error(`No SSH key file: set one, or add IdentityFile to ~/.ssh/config (looked for ${candidates.join(', ')}).`);
+    }
+    for (const file of files) attempts.push({ type: 'publickey', username, key: readFileSync(file), ...(secret ? { passphrase: secret } : {}) });
+  } else {
+    const agent = process.env.SSH_AUTH_SOCK ?? (process.platform === 'win32' ? '\\\\.\\pipe\\openssh-ssh-agent' : undefined);
+    if (!agent) throw new Error('SSH agent is not available (SSH_AUTH_SOCK is not set).');
+    attempts.push({ type: 'agent', username, agent });
+  }
+  attempts.push({
+    type: 'keyboard-interactive',
+    username,
+    prompt: (name: string, instructions: string, _lang: string, prompts: { prompt: string; echo: boolean }[], finish: (answers: string[]) => void) => {
+      if (ssh.auth === 'password' && secret !== undefined && prompts.every((p) => /password/i.test(p.prompt))) return finish(prompts.map(() => secret));
+      if (!askKeyboard) return finish([]);
+      const title = [name, instructions].filter((s) => s?.trim()).join(' — ') || `SSH ${ssh.host}`;
+      askKeyboard(title, prompts).then((a) => finish(a ?? []), () => finish([]));
+    },
+  });
+  return (_methodsLeft, _partial, next) => next(attempts.shift() ?? false);
 }
 
 /**

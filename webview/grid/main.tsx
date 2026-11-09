@@ -270,7 +270,8 @@ function App() {
         const next = cloneChanges(prev);
         for (const { location: [col, row], value: cell } of edits) {
           if (!colEditable(col)) continue;
-          const text = String(cell.data ?? '');
+          // null = NULL(그리드 안에서 복사한 NULL 셀을 붙여넣을 때)
+          const text = cell.data === null ? null : String(cell.data ?? '');
           if (row >= loadedRef.current) {
             const ins = next.inserts[row - loadedRef.current];
             if (ins) ins.set(col, text);
@@ -289,6 +290,50 @@ function App() {
     [editable, edit],
   );
   const onCellEdited = useCallback(([col, row]: Item, cell: { data?: unknown }) => applyEdits([{ location: [col, row], value: cell }]), [applyEdits]);
+
+  /**
+   * NULL과 빈 문자열: 클립보드 글자로는 둘 다 빈 칸이다(다른 앱에 'NULL'이라는 글자를 넣지 않는다).
+   * 그래서 이 그리드에서 복사할 때 원래 값(NULL 포함)을 기억해 두고, 같은 내용을 이 그리드에 붙여넣으면 그 값을 쓴다.
+   */
+  const lastCopy = useRef<{ texts: string[][]; values: (string | null)[][] }>();
+  const getCellsForSelection = useCallback(
+    (r: Rectangle) => {
+      const cells: GridCell[][] = [];
+      const values: (string | null)[][] = [];
+      for (let row = r.y; row < r.y + r.height; row++) {
+        const line: GridCell[] = [];
+        const vals: (string | null)[] = [];
+        for (let col = r.x; col < r.x + r.width; col++) {
+          const cell = getCellContent([col, row]);
+          line.push(cell);
+          const text = cell.kind === GridCellKind.Text ? cell.data : '';
+          vals.push(cell.kind === GridCellKind.Text && text === '' && cell.displayData === 'NULL' ? null : text);
+        }
+        cells.push(line);
+        values.push(vals);
+      }
+      lastCopy.current = { texts: values.map((l) => l.map((v) => v ?? '')), values };
+      return cells;
+    },
+    [getCellContent],
+  );
+  const onPaste = useCallback(
+    (target: Item, pasted: readonly (readonly string[])[]) => {
+      const copy = lastCopy.current;
+      const same = !!copy && copy.texts.length === pasted.length && copy.texts.every((l, i) => l.length === pasted[i].length && l.every((v, j) => v === pasted[i][j]));
+      if (!same || !copy.values.some((l) => l.includes(null))) return true; // 기본 붙여넣기
+      const edits: { location: Item; value: { data: string | null } }[] = [];
+      copy.values.forEach((l, i) =>
+        l.forEach((v, j) => {
+          const at: Item = [target[0] + j, target[1] + i];
+          if (at[0] < gridColumns.length && at[1] < totalRows) edits.push({ location: at, value: { data: v } });
+        }),
+      );
+      applyEdits(edits);
+      return false;
+    },
+    [applyEdits, gridColumns.length, totalRows],
+  );
 
   const done = phase.kind === 'rows' && phase.done;
   const onVisibleRegionChanged = useCallback(
@@ -513,7 +558,8 @@ function App() {
             columns={gridColumns}
             rows={totalRows}
             getCellContent={getCellContent}
-            getCellsForSelection
+            getCellsForSelection={getCellsForSelection}
+            onPaste={onPaste}
             onCellEdited={onCellEdited}
             onCellsEdited={(edits) => {
               applyEdits(edits.map((e) => ({ location: e.location, value: e.value as { data?: unknown } })));

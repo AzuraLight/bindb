@@ -168,8 +168,8 @@ export function GeneralTab(p: EditorProps) {
           </Row>
         )}
 
-        {form.driver === 'h2' && (form.h2Mode === 'file' || urlOnly) && (
-          <Row label="H2 jar" htmlFor="f-jar" hint="Driver file for H2 Embedded. Shared by all H2 data sources; needs java on PATH.">
+        {form.driver === 'h2' && (
+          <Row label="H2 jar" htmlFor="f-jar" hint="H2 JDBC driver file, shared by all H2 data sources. BindB runs it in a Java process started only while connected (Java 11+ on PATH or JAVA_HOME).">
             <div className="with-button">
               <input id="f-jar" value={p.h2Jar} onChange={(e) => p.setH2Jar(e.target.value)} placeholder="h2-*.jar" />
               <button className="dots" title="Choose the H2 jar" onClick={() => p.pick('h2Jar')}>
@@ -719,9 +719,11 @@ export function SshSslTab(p: EditorProps) {
             onChange={(e) => p.setSecret('sslKey', { value: e.target.value, clear: false })}
           />
         </Row>
-        <Row label="Mode" htmlFor="l-mode">
-          <Select id="l-mode" className="short" disabled={!useSsl} value={useSsl ? form.ssl : 'require'} onChange={(e) => p.setForm({ ...form, ssl: e.target.value as 'require' | 'verify' })}>
+        <Row label="Mode" htmlFor="l-mode" hint="Prefer: SSL if the server supports it, otherwise plain. Require: encrypt without checking the certificate — with a CA file it checks the chain like Verify CA (as libpq does). Verify CA: certificate chain. Verify full: chain and host name.">
+          <Select id="l-mode" className="short" disabled={!useSsl} value={useSsl ? form.ssl : 'require'} onChange={(e) => p.setForm({ ...form, ssl: e.target.value as ConnectionForm['ssl'] })}>
+            <option value="prefer">Prefer</option>
             <option value="require">Require</option>
+            <option value="verify-ca">Verify CA</option>
             <option value="verify">Verify full</option>
           </Select>
         </Row>

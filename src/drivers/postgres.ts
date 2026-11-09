@@ -1,23 +1,30 @@
 import { Client, TypeOverrides, type ClientConfig } from 'pg';
 import Cursor from 'pg-cursor';
-import { driverOptionValues, resolveTarget, tlsOptions } from './common';
-import { BufferedCursor, emptyCursor } from './cursor';
+import { connect } from 'node:net';
+import { tokenize } from '../language/tokenizer';
+import { driverOptionValues, isSslUnsupported, resolveTarget, tlsOptions } from './common';
+import { BufferedCursor, emptyCursor, queryAll } from './cursor';
 import { introspectInfoSchema } from './infoSchema';
-import type { ConnectionConfig, ConnectOptions, Driver, QueryCursor, Session } from './types';
+import type { ConnectionConfig, ConnectOptions, Driver, MetaTable, QueryCursor, Session } from './types';
 
 const FIRST_BATCH = 200;
 
 /**
- * 날짜 · 시각 타입은 서버가 보낸 글자 그대로 받는다.
- * node-postgres는 기본으로 date/timestamp를 Node 프로세스의 로컬 시간대 Date로 바꿔서
- * 시간대만큼 밀리고 마이크로초가 사라진다(https://node-postgres.com/features/types).
- * OID와 배열 OID는 PostgreSQL pg_type.dat 기준.
+ * 값은 서버가 보낸 글자 그대로 받고, 아래 타입만 JS 값으로 바꾼다.
+ * node-postgres의 기본 변환은 그리드 · 복사 · 내보내기 · 편집에서 값을 바꿔 버린다:
+ *  - date/timestamp: Node 프로세스의 로컬 시간대 Date가 되어 시간대만큼 밀리고 마이크로초가 사라진다
+ *    (https://node-postgres.com/features/types)
+ *  - 배열 · point · circle: JS 배열 · 객체가 되어 JSON으로 보인다. `{a,b}` 대신 `["a","b"]`라서
+ *    그 셀을 고쳐 저장하면 malformed array literal로 실패한다
+ * 바꾸는 타입(OID는 PostgreSQL pg_type.dat 기준): bool 16 · bytea 17 · int2 21 · int4 23 · oid 26 ·
+ * float4 700 · float8 701 · json 114 · jsonb 3802. int8 · numeric은 node-postgres도 글자로 준다.
  * 쿼리마다 types를 넘긴다 — pg-cursor는 클라이언트의 types를 쓰지 않는다(pg-cursor/index.js).
  */
-export const rawDateTypes = new TypeOverrides();
-for (const oid of [1082, 1182, 1083, 1183, 1114, 1115, 1184, 1185, 1186, 1187, 1266, 1270]) {
-  rawDateTypes.setTypeParser(oid, 'text', (v: string) => v);
-}
+const PARSED_OIDS = new Set([16, 17, 21, 23, 26, 700, 701, 114, 3802]);
+export const pgTextTypes = new TypeOverrides();
+const defaultParser = pgTextTypes.getTypeParser.bind(pgTextTypes);
+pgTextTypes.getTypeParser = ((oid: number, format?: 'text' | 'binary') =>
+  format === 'binary' || PARSED_OIDS.has(oid) ? defaultParser(oid, format) : (v: string) => v) as typeof pgTextTypes.getTypeParser;
 
 function readCursor(cursor: Cursor, n: number): Promise<{ rows: unknown[][]; result: any }> {
   return new Promise((resolve, reject) => {
@@ -52,7 +59,7 @@ export function pgClientConfig(cfg: ConnectionConfig, opts: ConnectOptions): Cli
         ? () => readPgpass({ host: opts.realTarget?.host ?? host, port: opts.realTarget?.port ?? port, database: t.database, user: t.user })
         : password,
     connectionTimeoutMillis: (cfg.connectTimeout ?? 10) * 1000,
-    types: rawDateTypes,
+    types: pgTextTypes,
     ssl: tlsOptions(t, opts) ?? false,
   };
 }
@@ -63,6 +70,102 @@ function readPgpass(info: { host: string; port: number; database?: string; user?
   return new Promise((resolve, reject) =>
     pgpass(info, (pass) => (pass === undefined ? reject(new Error('No matching entry in ~/.pgpass.')) : resolve(pass))),
   );
+}
+
+/**
+ * COPY … FROM STDIN / TO STDOUT는 COPY 하위 프로토콜로 데이터를 주고받는다. pg-cursor는 이를 처리하지 못해
+ * pg 안에서 잡히지 않는 예외(handleCopyData is not a function)가 나고 그 연결은 끝나지 않는다.
+ * 보내기 전에 막는다. 서버 파일로 쓰는 COPY … TO '경로'는 일반 응답이라 그대로 둔다.
+ */
+export function usesCopyProtocol(sql: string): boolean {
+  const words = tokenize(sql, 'postgres')
+    .filter((t) => t.type === 'word')
+    .map((t) => t.text.toUpperCase());
+  return words[0] === 'COPY' && (words.includes('STDIN') || words.includes('STDOUT'));
+}
+
+/**
+ * CancelRequest: Int32 16 · Int32 80877102 · Int32 프로세스 id · Int32 비밀 키를 보내고 서버가 연결을 닫는다(응답 없음).
+ * https://www.postgresql.org/docs/current/protocol-flow.html#PROTOCOL-FLOW-CANCELING-REQUESTS
+ * SSH 터널을 거치면 host · port는 터널의 로컬 끝이다(같은 서버로 간다).
+ */
+export function sendCancelRequest(host: string, port: number, pid: number, key: number): Promise<void> {
+  const packet = Buffer.alloc(16);
+  packet.writeInt32BE(16, 0);
+  packet.writeInt32BE(80877102, 4);
+  packet.writeInt32BE(pid, 8);
+  packet.writeInt32BE(key, 12);
+  return new Promise((resolve, reject) => {
+    const socket = host.startsWith('/') ? connect(`${host}/.s.PGSQL.${port}`) : connect(port, host);
+    socket.setTimeout(5000, () => socket.destroy(new Error('Timed out sending the cancel request.')));
+    socket.once('connect', () => socket.end(packet));
+    socket.once('error', reject);
+    socket.once('close', (hadError) => (hadError ? undefined : resolve()));
+  });
+}
+
+/**
+ * 머티리얼라이즈드 뷰는 SQL 표준이 아니라 information_schema에 나오지 않는다.
+ * pg_matviews · pg_attribute에서 읽어 뷰로 더한다(읽기 전용, 정의는 Load sources for를 따른다).
+ * https://www.postgresql.org/docs/current/view-pg-matviews.html
+ */
+async function materializedViews(session: Session, filter: string, cfg: ConnectionConfig, isSystem: (s: string) => boolean): Promise<MetaTable[]> {
+  const level = cfg.introspectionLevel ?? 3;
+  let views: unknown[][];
+  try {
+    views = await queryAll(
+      session,
+      `SELECT table_schema, table_name, definition FROM (
+         SELECT schemaname AS table_schema, matviewname AS table_name, definition FROM pg_catalog.pg_matviews) m
+       WHERE ${filter} ORDER BY table_schema, table_name`,
+    );
+  } catch {
+    return [];
+  }
+  if (!views.length) return [];
+  const columns =
+    level === 1
+      ? []
+      : await queryAll(
+          session,
+          `SELECT table_schema, table_name, column_name, data_type FROM (
+             SELECT n.nspname AS table_schema, c.relname AS table_name, a.attname AS column_name,
+                    pg_catalog.format_type(a.atttypid, a.atttypmod) AS data_type, a.attnum
+               FROM pg_catalog.pg_class c
+               JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+               JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid
+              WHERE c.relkind = 'm' AND a.attnum > 0 AND NOT a.attisdropped) m
+           WHERE ${filter} ORDER BY table_schema, table_name, attnum`,
+        );
+  const load = level < 3 ? 'none' : (cfg.loadSources ?? 'nonSystem');
+  const byKey = new Map<string, MetaTable>();
+  for (const [schema, name, def] of views) {
+    const loadDef = load === 'all' || (load === 'nonSystem' && !isSystem(String(schema)));
+    byKey.set(`${schema}\u0000${name}`, {
+      schema: String(schema),
+      name: String(name),
+      kind: 'view',
+      columns: [],
+      ...(loadDef && def != null ? { definition: String(def) } : {}),
+    });
+  }
+  for (const [schema, table, name, type] of columns) {
+    byKey.get(`${schema}\u0000${table}`)?.columns.push({ name: String(name), type: type == null ? undefined : String(type) });
+  }
+  return [...byKey.values()];
+}
+
+async function connectPg(cfg: ConnectionConfig, opts: ConnectOptions): Promise<Session> {
+  const clientConfig = pgClientConfig(cfg, opts);
+  const client = new Client(clientConfig);
+  await client.connect();
+  try {
+    if (cfg.readOnly) await client.query('SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY');
+  } catch (e) {
+    await client.end().catch(() => {});
+    throw e;
+  }
+  return new PgSession(client, clientConfig);
 }
 
 class PgSession implements Session {
@@ -81,7 +184,10 @@ class PgSession implements Session {
   }
 
   async execute(sql: string, params?: readonly unknown[]): Promise<QueryCursor> {
-    const cursor = this.client.query(new Cursor(sql, params?.length ? [...params] : undefined, { rowMode: 'array', types: rawDateTypes }));
+    if (usesCopyProtocol(sql)) {
+      throw new Error('COPY … FROM STDIN / TO STDOUT is not supported here. Use Export in the result grid, or COPY … TO / FROM a server file.');
+    }
+    const cursor = this.client.query(new Cursor(sql, params?.length ? [...params] : undefined, { rowMode: 'array', types: pgTextTypes }));
     let first;
     try {
       first = await readCursor(cursor, FIRST_BATCH);
@@ -106,6 +212,16 @@ class PgSession implements Session {
   async cancel(): Promise<void> {
     const pid = (this.client as any).processID;
     if (!pid) return;
+    // 표준 방식: 새 연결로 CancelRequest(16바이트)를 보낸다 — 로그인이 필요 없어서 연결 수 한도 · 권한과
+    // 상관없이 된다. 보낼 수조차 없을 때만(소켓 오류) 로그인해서 pg_cancel_backend를 부른다.
+    const key = (this.client as any).secretKey;
+    if (typeof key === 'number') {
+      const sent = await sendCancelRequest(String(this.clientConfig.host ?? 'localhost'), Number(this.clientConfig.port ?? 5432), pid, key).then(
+        () => true,
+        () => false,
+      );
+      if (sent) return;
+    }
     const killer = new Client(this.clientConfig);
     await killer.connect();
     try {
@@ -128,23 +244,23 @@ export const postgresDriver: Driver = {
   defaultSchema: () => 'public',
 
   async connect(cfg, opts) {
-    const clientConfig = pgClientConfig(cfg, opts);
-    const client = new Client(clientConfig);
-    await client.connect();
     try {
-      if (cfg.readOnly) await client.query('SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY');
+      return await connectPg(cfg, opts);
     } catch (e) {
-      await client.end().catch(() => {});
-      throw e;
+      // SSL mode Prefer: 서버가 SSL을 지원하지 않으면 평문으로 다시 붙는다(libpq와 같다)
+      const t = resolveTarget(cfg, opts);
+      if (t.cfg.ssl !== 'prefer' || !isSslUnsupported(e)) throw e;
+      return connectPg({ ...t.cfg, connectionType: 'default', url: undefined, ssl: 'disable' }, { ...opts, password: t.password });
     }
-    return new PgSession(client, clientConfig);
   },
 
-  introspect(session, cfg) {
+  async introspect(session, cfg) {
     // Show internal system schemas를 켜면 pg_catalog · information_schema · pg_toast도 읽는다
     const filter = cfg.showSystemSchemas
       ? `table_schema NOT LIKE 'pg\\_temp%'`
       : `table_schema NOT IN ('pg_catalog', 'information_schema') AND table_schema NOT LIKE 'pg\\_toast%' AND table_schema NOT LIKE 'pg\\_temp%'`;
-    return introspectInfoSchema(session, filter, cfg, (s) => /^(pg_catalog|information_schema|pg_toast.*)$/.test(s));
+    const isSystem = (s: string) => /^(pg_catalog|information_schema|pg_toast.*)$/.test(s);
+    const tables = await introspectInfoSchema(session, filter, cfg, isSystem);
+    return [...tables, ...(await materializedViews(session, filter, cfg, isSystem))];
   },
 };

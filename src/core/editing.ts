@@ -39,8 +39,8 @@ export interface Statement {
   preview: string;
 }
 
-/** 드라이버별 매개변수 자리표시자: postgres · h2(pg 프로토콜)는 $n, mysql · sqlite는 ? */
-const placeholder = (dialect: SqlDialect, n: number) => (dialect === 'postgres' || dialect === 'h2' ? `$${n}` : '?');
+/** 드라이버별 매개변수 자리표시자: postgres는 $n, mysql · sqlite · h2(JDBC)는 ? */
+const placeholder = (dialect: SqlDialect, n: number) => (dialect === 'postgres' ? `$${n}` : '?');
 
 /** 기존 행의 키 값. 키 열이 NULL이면 그 행은 찾을 수 없다 */
 function keyValues(target: TableTarget, row: readonly ExportCell[]): unknown[] | string {

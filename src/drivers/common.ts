@@ -11,7 +11,7 @@ function systemCertificates(): string[] {
 import { homedir } from 'node:os';
 import * as path from 'node:path';
 import { parseUrl } from '../core/connectionDraft';
-import type { ConnectionConfig, ConnectOptions, SharedSshConfig } from './types';
+import type { ConnectionConfig, ConnectOptions, SharedSshConfig, SslMode } from './types';
 
 /** 공유 SSH 설정을 가리키면 그 값으로 채운다(사용 여부 · 로컬 포트는 데이터 소스 것) */
 export function resolveSharedSsh(cfg: ConnectionConfig, shared: readonly SharedSshConfig[]): ConnectionConfig {
@@ -39,6 +39,8 @@ export function resolveTarget(cfg: ConnectionConfig, opts: ConnectOptions): { cf
     file = file.replace(/^~(?=\/|$)/, homedir());
     return { cfg: { ...cfg, file }, password: passwordFor(cfg, opts.password) };
   }
+  // H2의 tcp · ssl · mem URL은 JDBC URL 그대로 쓴다(h2JdbcUrl) — PostgreSQL URL로 읽지 않는다
+  if (cfg.driver === 'h2') return { cfg, password: passwordFor(cfg, opts.password) };
   const parsed = parseUrl(cfg.url, cfg.driver === 'mysql' ? 'mysql' : 'postgres');
   if (!parsed.ok) throw new Error(`Connection URL: ${parsed.error}`);
   const p = parsed.patch;
@@ -65,12 +67,27 @@ export function resolvePath(cfg: ConnectionConfig, file: string): string {
   return path.isAbsolute(file) || !cfg.workingDirectory ? file : path.resolve(cfg.workingDirectory, file);
 }
 
+/** 실제로 쓸 검사 수준. libpq처럼 require + CA 파일은 verify-ca다 */
+export function effectiveSslMode(cfg: Pick<ConnectionConfig, 'ssl' | 'sslCaFile'>): SslMode {
+  const mode = cfg.ssl ?? 'disable';
+  return mode === 'require' && cfg.sslCaFile ? 'verify-ca' : mode;
+}
+
+/** prefer로 SSL을 시도했는데 서버가 SSL을 지원하지 않는다는 오류인가(그러면 평문으로 다시 붙는다) */
+export function isSslUnsupported(e: unknown): boolean {
+  // pg: "The server does not support SSL connections" · mysql2: "Server does not support secure connection"
+  return /does not support (SSL|secure) connection/i.test(String((e as Error)?.message ?? e));
+}
+
 /** SSL 설정(인증서 · 키 파일 포함). 꺼져 있으면 undefined */
 export function tlsOptions(cfg: ConnectionConfig, opts: ConnectOptions): Record<string, unknown> | undefined {
   if (!cfg.ssl || cfg.ssl === 'disable') return undefined;
   const read = (file?: string) => (file ? readFileSync(resolvePath(cfg, file)) : undefined);
-  const tls: Record<string, unknown> = { rejectUnauthorized: cfg.ssl === 'verify' };
   const ca = read(cfg.sslCaFile);
+  const mode = effectiveSslMode(cfg);
+  const tls: Record<string, unknown> = { rejectUnauthorized: mode === 'verify' || mode === 'verify-ca' };
+  // verify-ca: 체인만 검사하고 호스트 이름은 보지 않는다
+  if (mode === 'verify-ca') tls.checkServerIdentity = () => undefined;
   const cert = read(cfg.sslCertFile);
   const key = read(cfg.sslKeyFile);
   // Use truststore: CA 파일에 더해 Node 내장 목록 · OS 저장소를 믿는다. 기본(둘 다, CA 파일 없음)이면 Node 기본값 그대로

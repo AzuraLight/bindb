@@ -1,5 +1,5 @@
 import mysql, { type Connection, type ConnectionOptions } from 'mysql2';
-import { driverOptionValues, resolveTarget, tlsOptions } from './common';
+import { driverOptionValues, effectiveSslMode, isSslUnsupported, resolveTarget, tlsOptions } from './common';
 import { BufferedCursor, emptyCursor } from './cursor';
 import { introspectInfoSchema } from './infoSchema';
 import type { ConnectionConfig, ConnectOptions, Driver, QueryCursor, Session } from './types';
@@ -33,15 +33,42 @@ class MySqlSession implements Session {
 
   async execute(sql: string, params?: readonly unknown[]): Promise<QueryCursor> {
     const query = this.conn.query({ sql, rowsAsArray: true, ...(params?.length ? { values: [...params] } : {}) });
+    // CALL은 결과 집합을 여러 개 돌려줄 수 있다. 그리드에는 열이 있는 첫 결과 집합만 보인다
     let fields: { name: string; type?: number }[] | undefined;
-    query.on('fields', (f: any[]) => (fields = f));
-    const iter = query.stream({ highWaterMark: FIRST_BATCH })[Symbol.asyncIterator]();
+    let fieldsSeen = 0;
+    query.on('fields', (f: any[]) => {
+      fieldsSeen++;
+      fields ??= f;
+    });
+    const stream = query.stream({ highWaterMark: FIRST_BATCH });
+    // 스트림 값에는 어느 결과 집합의 것인지가 없다. 같은 'result' 이벤트에서 그때까지 받은 열 정보 수를 같은 순서로 적어 둔다
+    // (1이면 첫 열 정보 = fields의 행). 열 정보와 행이 늘 같은 결과 집합에서 온다 — 첫 SELECT가 0행이어도
+    const setOf: number[] = [];
+    query.on('result', () => setOf.push(fieldsSeen));
+    const raw = stream[Symbol.asyncIterator]();
+    /** 처음 받은 OK 패킷(SELECT가 아닌 문장의 영향받은 행 수) */
+    let header: { affectedRows?: number } | undefined;
+    const iter: AsyncIterator<unknown[]> = {
+      async next() {
+        for (;;) {
+          const r = await raw.next();
+          if (r.done) return r;
+          const set = setOf.shift();
+          // OK 패킷(ResultSetHeader) · 뒤의 결과 집합은 이 그리드에 섞지 않는다
+          if (!Array.isArray(r.value)) {
+            header ??= r.value as { affectedRows?: number };
+            continue;
+          }
+          if (set === 1) return r as IteratorResult<unknown[]>;
+        }
+      },
+    };
 
     const first = await iter.next();
     if (!fields) {
-      // SELECT가 아닌 문장: 스트림의 유일한 값이 ResultSetHeader다.
+      // SELECT가 아닌 문장: 행 없이 OK 패킷만 왔다(first는 끝).
       await drain(iter);
-      return emptyCursor(first.done ? undefined : (first.value as any)?.affectedRows);
+      return emptyCursor(header?.affectedRows);
     }
 
     let finished = !!first.done;
@@ -92,6 +119,18 @@ async function drain(iter: AsyncIterator<unknown>): Promise<void> {
   }
 }
 
+async function connectMySql(cfg: ConnectionConfig, opts: ConnectOptions): Promise<Session> {
+  const options = mysqlOptions(cfg, opts);
+  const conn = await connect(options);
+  try {
+    if (cfg.readOnly) await run(conn, 'SET SESSION TRANSACTION READ ONLY');
+  } catch (e) {
+    conn.destroy();
+    throw e;
+  }
+  return new MySqlSession(conn, options);
+}
+
 function mysqlOptions(cfg: ConnectionConfig, opts: ConnectOptions): ConnectionOptions {
   const { cfg: t, password } = resolveTarget(cfg, opts);
   return {
@@ -107,12 +146,12 @@ function mysqlOptions(cfg: ConnectionConfig, opts: ConnectOptions): ConnectionOp
       const tls = tlsOptions(t, opts);
       if (!tls) return undefined;
       // 터널을 거치면 mysql2의 호스트 이름 확인이 127.0.0.1로 하게 된다 — 실제 호스트 이름으로 확인한다
-      if (opts.realTarget && t.ssl === 'verify') {
+      if (opts.realTarget && effectiveSslMode(t) === 'verify') {
         const { checkServerIdentity } = require('node:tls') as typeof import('node:tls');
         const real = opts.realTarget.host;
         return { ...tls, verifyIdentity: false, checkServerIdentity: (_h: string, cert: import('node:tls').PeerCertificate) => checkServerIdentity(real, cert) } as ConnectionOptions['ssl'];
       }
-      return { ...tls, verifyIdentity: t.ssl === 'verify' } as ConnectionOptions['ssl'];
+      return { ...tls, verifyIdentity: effectiveSslMode(t) === 'verify' } as ConnectionOptions['ssl'];
     })(),
     dateStrings: true,
     supportBigNumbers: true,
@@ -128,15 +167,14 @@ export const mysqlDriver: Driver = {
   defaultSchema: (cfg) => (cfg.connectionType === 'url' ? resolveTarget(cfg, {}).cfg.database : cfg.database),
 
   async connect(cfg, opts) {
-    const options = mysqlOptions(cfg, opts);
-    const conn = await connect(options);
     try {
-      if (cfg.readOnly) await run(conn, 'SET SESSION TRANSACTION READ ONLY');
+      return await connectMySql(cfg, opts);
     } catch (e) {
-      conn.destroy();
-      throw e;
+      // SSL mode Prefer(ssl-mode=PREFERRED): 서버가 SSL을 지원하지 않으면 평문으로 다시 붙는다
+      const t = resolveTarget(cfg, opts);
+      if (t.cfg.ssl !== 'prefer' || !isSslUnsupported(e)) throw e;
+      return connectMySql({ ...t.cfg, connectionType: 'default', url: undefined, ssl: 'disable' }, { ...opts, password: t.password });
     }
-    return new MySqlSession(conn, options);
   },
 
   introspect(session, cfg) {

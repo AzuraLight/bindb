@@ -25,23 +25,26 @@ Schema-aware SQL editing and a fast result grid for **PostgreSQL**, **MySQL / Ma
 
 ## H2
 
-H2 has no Node.js driver, so BindB talks to H2's built-in PostgreSQL protocol server. Two modes:
+H2 is a Java database, so BindB runs the H2 JDBC driver in a small Java process that starts when you connect and stops when the last H2 connection closes — the same design DataGrip uses. It talks to BindB over standard input/output and opens no network port.
 
-- **Running H2 server** — start H2 with `java -cp h2.jar org.h2.tools.Server -pg` (default port 5435) and connect to it.
-- **Database file** — pick a `.mv.db` file and BindB starts the server for you. This needs `java` on your `PATH` and the path to an `h2-*.jar` in the `bindb.h2.jarPath` setting. BindB does not ship H2 itself.
+- **Embedded** — pick a `.mv.db` file (or a 1.4 `.h2.db` file with an H2 1.4 jar).
+- **Remote** — an H2 TCP server, `jdbc:h2:tcp://host:9092/db`.
+- **URL only** — any H2 JDBC URL, including `jdbc:h2:mem:…`.
+
+You need Java 11 or later (`JAVA_HOME` or `java` on `PATH`) and an `h2-*.jar` (Drivers → H2 → Download, or `bindb.h2.jarPath`). Each H2 jar opens only its own file format (1.4 → format 1, 2.0–2.1 → 2, 2.2+ → 3); BindB tells you which jar a file needs. BindB does not ship H2 or Java. Settings such as `AUTO_SERVER=TRUE` go in the data source's driver options.
 
 ## Settings
 
 | Setting | Description |
 |---|---|
 | `bindb.connections` | Connection definitions. Edited by **Add Connection**; passwords are not stored here. |
-| `bindb.h2.jarPath` | Path to `h2-*.jar`, used to open H2 database files. |
+| `bindb.h2.jarPath` | Path to the H2 driver `h2-*.jar`. |
 | `bindb.grid.pageSize` | Rows fetched per page in the result grid (default 500). |
 
 ## Known limitations
 
 - SQLite databases are loaded into memory and written back after each change. Avoid editing the same file from another program while BindB has it open.
-- H2 results are fetched in full rather than page by page, and running H2 queries cannot be cancelled.
+- An embedded H2 file is locked while BindB has it open. To use it from your app at the same time, add `AUTO_SERVER=TRUE` to both.
 - No SSH tunnels yet.
 
 ## Privacy

@@ -1,5 +1,108 @@
 # Changelog
 
+## Unreleased
+
+### Fixed — found by edge-case testing on real PostgreSQL 16 and MySQL servers
+
+- **Read-only connections could be bypassed with parentheses.** A statement starting with `(` — for
+  example `(SELECT GET_LOCK('k', 1))` on MySQL or `(SELECT CSVWRITE(…))` on H2 — was classified as empty
+  and skipped the read-only check. Leading parentheses are now looked through, and anything that does
+  not start with a keyword is treated as a write.
+- More PostgreSQL functions count as writes on read-only connections and in AI queries: advisory locks
+  (`pg_try_advisory_lock`, `pg_advisory_lock_shared`, …, which survive a rollback), statistics resets,
+  `dblink_connect`, replication slots and `lo_from_bytea`.
+- **PostgreSQL `COPY … TO STDOUT` / `FROM STDIN` froze the connection** with an uncaught error inside
+  node-postgres. These are now refused with a message; `COPY … TO / FROM` a server file still runs.
+- **MySQL `CALL` with several result sets mixed them into one grid**, including the final OK packet as a
+  row. The grid now shows the first result set that has columns, with its own rows — also when an earlier
+  `SELECT` returned no rows or an `UPDATE` came first.
+- **PostgreSQL arrays, `point` and other non-scalar values are shown as PostgreSQL text** (`{"a,b",NULL}`,
+  `(1,2)`) instead of JSON (`["a,b",null]`, `{"x":1,"y":2}`). Editing such a cell failed with
+  "malformed array literal"; copy and export used the JSON form. Only booleans, integers, floats, `bytea`
+  and `json`/`jsonb` are still converted (H2 too, through the same PostgreSQL protocol).
+- **MySQL `DELIMITER` scripts** (procedure and trigger dumps) run statement by statement. The `DELIMITER`
+  lines are client directives and are no longer sent to the server.
+- A column named `begin` (allowed in PostgreSQL and MySQL) no longer merges the next statement into it.
+- Columns named like write keywords (`SELECT copy, load FROM t`, `ORDER BY create`) are no longer refused on
+  read-only connections. Writes inside reads (`WITH … AS (DELETE …)`, H2 `FINAL TABLE (INSERT …)`,
+  `EXPLAIN ANALYZE DELETE`) still are.
+- The grid's WHERE / ORDER BY bar refuses MySQL `#` and H2 `//` line comments like `--`, and queries that
+  start with a parenthesis (`(SELECT …) UNION (SELECT …)`) can be filtered and sorted.
+
+### Changed — H2 connects through JDBC
+
+- **H2 now runs its own JDBC driver** in a small Java process (`java/bridge`, 14 KB) that starts when you
+  connect and stops when the last H2 connection closes — the same design as DataGrip's driver process.
+  BindB used H2's PostgreSQL protocol server before, which forces lower-case names, so **databases made by
+  Java apps with default settings (schema `PUBLIC`) could not be opened at all**.
+  - Embedded files, **Remote = H2 TCP server** (`jdbc:h2:tcp://…`, default port 9092) and URL only
+    (including `jdbc:h2:mem:`). _Remote H2 connections that pointed at an H2 PostgreSQL server (port 5435)
+    need to be changed to its TCP server._
+  - Results are read page by page and running queries can be cancelled (both were missing for H2).
+  - H2 1.4 `.h2.db` files open with an H2 1.4 jar; databases made in PostgreSQL mode by earlier BindB
+    versions still open.
+  - No network port is opened (the PostgreSQL server listened on a local port with H2's `sa` account).
+  - Grid edits on H2 use `?` parameters; H2 array columns are read-only in the grid (writing back the
+    shown text `[a, b]` would store a one-element array). The H2 jar is needed for every H2 mode, not only files.
+  - Driver options of an H2 data source are added to the JDBC URL (`;AUTO_SERVER=TRUE` …).
+
+### Security — remaining items from `docs/audit-2026-11-06.md`
+
+- **Project connections keep their secrets per workspace.** The keychain is shared by every workspace, and
+  a project connection's password was stored under its id alone, so another repository that reused a
+  published id with a different host received that password. Project connections now use a
+  workspace-specific key, and a project connection with the same id as a global one is ignored.
+  _Passwords of existing project connections need to be entered once more._
+- Shared SSH configurations are read from user settings only (a workspace could redefine one by id).
+- `bindb.ai.allowWrites`, `bindb.ai.mcpServer.*` and `bindb.ssh.configurations` can only be set in user
+  settings, `bindb.h2.jarPath` in user or remote-machine settings — not from a repository's
+  `.vscode/settings.json`.
+- **The MCP server checks `Host` and `Origin`** (required by the MCP Streamable HTTP spec): requests from
+  web pages or rebound host names get 403 even with the token.
+- **Connect Claude Code** runs `claude mcp add-json` directly (no shell history, no temporary file); the
+  copied command works in PowerShell on Windows and its temporary token file is removed after 10 minutes
+  or when VS Code closes. **Connect Codex** can store only an environment variable name
+  (`bearer_token_env_var = "BINDB_MCP_TOKEN"`) instead of the token.
+
+### Fixed — remaining items from the audit
+
+- PostgreSQL **materialized views** appear in the explorer (as views, with columns and definition).
+- **Switching schema keeps the rest of `search_path`** (`"sales", "$user", public` instead of `"sales"`),
+  so functions and types of extensions in `public` are still found.
+- **Manual transaction mode** no longer wraps statements that cannot run in a transaction block
+  (`VACUUM`, `CREATE INDEX CONCURRENTLY`, `CREATE DATABASE`, `ALTER SYSTEM`, …) in `BEGIN`.
+- **Query cancel on PostgreSQL uses the protocol CancelRequest** instead of logging in again to call
+  `pg_cancel_backend`, so it also works at the connection limit, without extra privileges and through
+  PgBouncer.
+- **SSL modes follow libpq**: new **Prefer** (SSL if the server supports it, otherwise plain) and
+  **Verify CA** (chain only); **Require** with a CA file verifies the chain like libpq. URLs keep
+  `sslmode=prefer` / `verify-ca` and MySQL `ssl-mode=PREFERRED` / `VERIFY_CA` instead of turning them into
+  `require`.
+- **Filtering and sorting a query result** refuses queries that change data (they would run again) and,
+  on MySQL and H2, results with duplicate column names — with a message instead of a server error.
+- **SQL INSERT export for MySQL** writes strings that contain `\` as `_utf8mb4 X'…'`, which means the same
+  with and without `NO_BACKSLASH_ESCAPES`.
+- **H2 jar and file format are checked before opening**: each H2 jar opens only its own format
+  (1.4 → format 1, 2.0–2.1 → 2, 2.2+ → 3; verified with 1.4.200, 2.1.214 and 2.3.232), and `.h2.db`
+  PageStore files are explained, instead of a bare "Connection terminated unexpectedly".
+- **NULL survives copy and paste inside the grid** (it was pasted back as an empty string). Text copied to
+  other apps is unchanged.
+- **SSH**: every `IdentityFile` (and the default `id_ed25519` / `id_ecdsa` / `id_rsa`) is tried in order;
+  `Include` and the `%h %p %r %u %d` tokens are read; keyboard-interactive authentication answers password
+  prompts and asks for one-time codes; the Windows OpenSSH agent pipe is used when `SSH_AUTH_SOCK` is not
+  set; hosts that need `ProxyJump` / `ProxyCommand` are refused with a message instead of connecting
+  directly.
+- **known_hosts**: negated patterns (`!host`) are honoured, a key of another type is treated as new rather
+  than changed, `@revoked` is refused, and `/etc/ssh/ssh_known_hosts` is read too.
+
+### Tests
+
+- `test/realdb.test.ts` runs against real servers when `BINDB_TEST_PG` / `BINDB_TEST_MYSQL` are set
+  (`host:port`), and is skipped otherwise. `BINDB_TEST_MYSQL_CA` (the server's `ca.pem`) adds the SSL
+  mode checks.
+- `test/audit.test.ts`, `test-integration/security.test.js` and SSH authentication tests against an
+  in-process SSH server.
+
 ## 0.2.0
 
 Requires VS Code 1.103 or later (Node.js 22.17 in the extension host, for the built-in `node:sqlite`).

@@ -34,6 +34,35 @@ describe('splitStatements', () => {
     assert.equal(s.length, 2);
   });
 
+  // begin은 PostgreSQL · MySQL에서 예약어가 아니라 열 이름이 될 수 있다. 블록으로 세면 다음 문장과 합쳐졌다
+  it('a column named begin does not open a block', () => {
+    const texts = (s: string) => splitStatements(s, 'postgres').map((x) => x.text);
+    assert.deepEqual(texts('SELECT begin FROM t; SELECT 2'), ['SELECT begin FROM t', 'SELECT 2']);
+    assert.deepEqual(texts('SELECT a, begin, t.begin FROM t ORDER BY begin; SELECT 2').length, 2);
+    assert.deepEqual(texts('UPDATE t SET begin = now() WHERE begin IS NULL; SELECT 2').length, 2);
+    assert.deepEqual(texts('SELECT count(begin) AS n FROM t; SELECT 2').length, 2);
+    // 블록 BEGIN은 그대로
+    assert.equal(splitStatements('CREATE TRIGGER x AFTER INSERT ON a FOR EACH ROW BEGIN UPDATE b SET y = 1; END; SELECT 1', 'sqlite').length, 2);
+    assert.equal(splitStatements('CREATE PROCEDURE p() BEGIN SELECT 1; SELECT 2; END; SELECT 3', 'mysql').length, 2);
+    assert.equal(splitStatements('CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1; END; SELECT 2', 'postgres').length, 2);
+  });
+
+  it('MySQL DELIMITER scripts split on the current delimiter, outside strings and comments', () => {
+    const texts = (s: string) => splitStatements(s, 'mysql').map((x) => x.text);
+    assert.deepEqual(texts('DELIMITER //\nCREATE PROCEDURE p() BEGIN SELECT 1; END//\nDELIMITER ;\nCALL p();'), ['CREATE PROCEDURE p() BEGIN SELECT 1; END', 'CALL p()']);
+    // $$ 가 낱말에 붙어 있어도(END$$), 문자열 · 주석 안의 구분자는 넘긴다
+    assert.deepEqual(texts("delimiter $$\nSELECT '$$' AS a /* $$ */$$\nSELECT 2 END$$\n"), ["SELECT '$$' AS a", 'SELECT 2 END']);
+    // 문자열 · 주석 안의 DELIMITER 낱말은 지시어가 아니다
+    assert.deepEqual(texts("SELECT '\nDELIMITER //' AS x; -- DELIMITER //\nSELECT 2"), ["SELECT '\nDELIMITER //' AS x", 'SELECT 2']);
+    // 오프셋은 원문 기준(커서 위치 문장 찾기)
+    const doc = 'DELIMITER //\nSELECT 1//\nSELECT 2//';
+    const s = splitStatements(doc, 'mysql');
+    assert.equal(statementAt(s, doc.indexOf('2'))?.text, 'SELECT 2');
+    assert.equal(doc.slice(s[0].start, s[0].end), 'SELECT 1');
+    // 다른 DB에서 DELIMITER는 그냥 낱말
+    assert.equal(splitStatements('DELIMITER //\nSELECT 1', 'postgres').length, 1);
+  });
+
   it('picks the statement at or just before the cursor', () => {
     const text = 'select 1;\n\nselect 2;';
     const s = splitStatements(text);

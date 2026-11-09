@@ -246,7 +246,7 @@ describe('fixes from the code review', () => {
   it('a @revoked key is refused', async () => {
     const { checkKnownHost } = await import('../src/drivers/sshHosts');
     const key = Buffer.from('k');
-    assert.equal(checkKnownHost(`@revoked * ssh-ed25519 ${key.toString('base64')}\n`, 'h', 22, key), 'changed');
+    assert.equal(checkKnownHost(`@revoked * ssh-ed25519 ${key.toString('base64')}\n`, 'h', 22, key), 'revoked');
   });
 
   it('H2 and SQLite URL-only file forms', async () => {

@@ -51,6 +51,16 @@ describe('BindB MCP server', function () {
     await assert.rejects(connect('wrong-token'));
   });
 
+  // MCP 명세: Streamable HTTP 서버는 Origin을 확인해야 한다(DNS 리바인딩)
+  it('rejects requests from web pages (Origin) even with the token', async () => {
+    const auth = { Authorization: `Bearer ${await api.ai.token()}`, 'content-type': 'application/json', accept: 'application/json, text/event-stream' };
+    const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' });
+    const evil = await fetch(api.ai.url, { method: 'POST', headers: { ...auth, Origin: 'https://evil.example' }, body });
+    assert.equal(evil.status, 403);
+    const local = await fetch(api.ai.url, { method: 'POST', headers: { ...auth, Origin: new URL(api.ai.url).origin }, body });
+    assert.notEqual(local.status, 403);
+  });
+
   it('lists the tools with read-only hints', async () => {
     const { tools } = await client.listTools();
     const byName = Object.fromEntries(tools.map((t) => [t.name, t]));

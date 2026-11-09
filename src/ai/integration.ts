@@ -1,3 +1,5 @@
+import { execFile } from 'node:child_process';
+import { rmSync } from 'node:fs';
 import { appendFile, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -14,12 +16,41 @@ import { BindbMcpServer, newToken, schemaMarkdown } from './mcpServer';
  *    https://code.visualstudio.com/api/extension-guides/ai/mcp
  *  - Claude Code: `claude mcp add --transport http --scope user …` (설정은 ~/.claude.json, 저장소 파일에 토큰을 남기지 않는다)
  *    https://code.claude.com/docs/en/mcp
- *  - Codex: ~/.codex/config.toml 의 [mcp_servers.bindb] (url + http_headers)
+ *  - Codex: ~/.codex/config.toml 의 [mcp_servers.bindb] (url + http_headers, 또는 bearer_token_env_var)
  *  - 아무 AI 채팅: 연결의 스키마를 Markdown으로 복사
  */
 
 const TOKEN_KEY = 'bindb.mcp.token';
 const SECTION = 'bindb.ai';
+/** Codex bearer_token_env_var로 쓸 환경 변수 */
+export const TOKEN_ENV = 'BINDB_MCP_TOKEN';
+
+/** claude CLI를 셸 없이 실행한다. 없으면(PATH · Windows의 claude.cmd) notFound */
+function runClaude(args: string[]): Promise<{ ok: true } | { ok: false; notFound: boolean; error: string }> {
+  if (process.platform === 'win32') return Promise.resolve({ ok: false, notFound: true, error: 'not run directly on Windows' });
+  return new Promise((resolve) =>
+    execFile('claude', args, { timeout: 30_000 }, (err, _stdout, stderr) => {
+      if (!err) resolve({ ok: true });
+      else resolve({ ok: false, notFound: (err as NodeJS.ErrnoException).code === 'ENOENT', error: (stderr || err.message).trim() });
+    }),
+  );
+}
+
+/** 0600 임시 파일의 JSON으로 등록하고 그 폴더를 지우는 터미널 명령 */
+export function claudeCommand(file: string, dir: string, shell: 'posix' | 'powershell'): string {
+  if (shell === 'powershell') {
+    const q = (s: string) => `'${s.replace(/'/g, "''")}'`;
+    return `claude mcp add-json --scope user bindb (Get-Content -Raw -LiteralPath ${q(file)}); Remove-Item -Recurse -Force -LiteralPath ${q(dir)}`;
+  }
+  const q = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
+  return `claude mcp add-json --scope user bindb "$(cat ${q(file)})"; rm -rf ${q(dir)}`;
+}
+
+/** Codex config.toml의 [mcp_servers.bindb]. env면 토큰 대신 환경 변수 이름만 적는다 */
+export function codexSnippet(url: string, auth: { token: string } | { env: string }): string {
+  const authLine = 'env' in auth ? `bearer_token_env_var = "${auth.env}"` : `http_headers = { Authorization = "Bearer ${auth.token}" }`;
+  return `\n[mcp_servers.bindb]\nurl = "${url}"\n${authLine}\n`;
+}
 
 export class AiIntegration implements vscode.Disposable {
   readonly server: BindbMcpServer;
@@ -126,48 +157,89 @@ export class AiIntegration implements vscode.Disposable {
     return this.server.running;
   }
 
+  /**
+   * Claude Code에 등록한다(user 범위, ~/.claude.json — 저장소 파일이 아니다).
+   * `claude mcp add-json`은 JSON을 인자로만 받아서, 실행되는 동안 토큰이 프로세스 인자(ps)에 보이는 것은 피할 수 없다.
+   * 그래서 셸을 거치지 않고 직접 짧게 실행한다(셸 기록 · 임시 파일 없음). 직접 실행할 수 없으면(Windows의 claude.cmd 등)
+   * 0600 임시 파일을 읽는 명령을 터미널 종류에 맞게 만들고, 그 파일은 실행되지 않아도 10분 뒤 · 확장을 끌 때 지운다.
+   */
   private async setupClaudeCode(): Promise<void> {
     if (!(await this.ensureEnabled())) return;
-    // 토큰을 명령줄에 쓰지 않는다(셸 기록에 남는다). 0600 임시 파일에 JSON을 쓰고, 명령은 그 파일을 읽게 한다
     const json = JSON.stringify({ type: 'http', url: this.url, headers: { Authorization: `Bearer ${await this.token()}` } });
+    const now = 'Register Now';
+    const copy = 'Copy Command';
+    const pick = await vscode.window.showInformationMessage(
+      'Register BindB with Claude Code (user scope, stored in ~/.claude.json — not in this repository)?',
+      now,
+      copy,
+    );
+    if (pick === now) {
+      const ran = await runClaude(['mcp', 'add-json', '--scope', 'user', 'bindb', json]);
+      if (ran.ok) {
+        vscode.window.showInformationMessage('Registered BindB with Claude Code. Restart Claude Code sessions to pick it up.');
+        return;
+      }
+      if (!ran.notFound) {
+        vscode.window.showErrorMessage(`claude mcp add-json failed: ${ran.error}`);
+        return;
+      }
+      // claude를 직접 실행할 수 없다(PATH에 없음 · Windows .cmd): 터미널에서 실행할 명령으로
+    } else if (pick !== copy) {
+      return;
+    }
     const dir = await mkdtemp(path.join(os.tmpdir(), 'bindb-mcp-'));
     const file = path.join(dir, 'server.json');
     await writeFile(file, json, { encoding: 'utf8', mode: 0o600 });
-    const q = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
-    const cmd = `claude mcp add-json --scope user bindb "$(cat ${q(file)})" && rm -rf ${q(dir)}`;
-    const run = 'Run in Terminal';
-    const copy = 'Copy Command';
-    const pick = await vscode.window.showInformationMessage(
-      'Register BindB with Claude Code (user scope, stored in ~/.claude.json — not in this repository). The token is read from a private temporary file, so it does not end up in your shell history.',
-      run,
-      copy,
-    );
-    if (pick === run) {
+    this.scheduleCleanup(dir);
+    const cmd = claudeCommand(file, dir, process.platform === 'win32' ? 'powershell' : 'posix');
+    if (pick === now) {
       const term = vscode.window.createTerminal('BindB → Claude Code');
       term.show();
       term.sendText(cmd);
-    } else if (pick === copy) {
-      await vscode.env.clipboard.writeText(cmd);
-      vscode.window.showInformationMessage('Copied. Paste it in a terminal where `claude` is installed (the temporary file is removed after it runs).');
     } else {
-      await rm(dir, { recursive: true, force: true });
+      await vscode.env.clipboard.writeText(cmd);
+      vscode.window.showInformationMessage('Copied. Paste it in a terminal where `claude` is installed within 10 minutes — the temporary file with the token is removed after it runs, or after 10 minutes.');
     }
+  }
+
+  private readonly tempDirs = new Set<string>();
+  private scheduleCleanup(dir: string): void {
+    this.tempDirs.add(dir);
+    const timer = setTimeout(() => void this.cleanup(dir), 10 * 60_000);
+    timer.unref?.();
+  }
+  private async cleanup(dir: string): Promise<void> {
+    this.tempDirs.delete(dir);
+    await rm(dir, { recursive: true, force: true }).catch(() => {});
   }
 
   /** Codex: ~/.codex/config.toml 에 [mcp_servers.bindb]를 더한다(이미 있으면 건드리지 않는다) */
   private async setupCodex(): Promise<void> {
     if (!(await this.ensureEnabled())) return;
-    const snippet = `\n[mcp_servers.bindb]\nurl = "${this.url}"\nhttp_headers = { Authorization = "Bearer ${await this.token()}" }\n`;
+    const token = await this.token();
     const file = path.join(process.env.CODEX_HOME ?? path.join(os.homedir(), '.codex'), 'config.toml');
     const add = 'Add to config.toml';
+    const env = 'Use Environment Variable';
     const copy = 'Copy Snippet';
-    const pick = await vscode.window.showInformationMessage(`Register BindB with Codex in ${file}?`, add, copy);
+    const pick = await vscode.window.showInformationMessage(
+      `Register BindB with Codex in ${file}?`,
+      { detail: `"${add}" stores the token in that file (readable only by you). "${env}" stores only the variable name ${TOKEN_ENV}; you set it where Codex runs.` },
+      add,
+      env,
+      copy,
+    );
+    const snippet = codexSnippet(this.url, pick === env ? { env: TOKEN_ENV } : { token });
     if (pick === copy) {
       await vscode.env.clipboard.writeText(snippet.trim());
       vscode.window.showInformationMessage('Copied the [mcp_servers.bindb] section.');
       return;
     }
-    if (pick !== add) return;
+    if (pick === env) {
+      await vscode.env.clipboard.writeText(token);
+      vscode.window.showInformationMessage(`The token is on the clipboard. Set ${TOKEN_ENV} to it in the environment Codex runs in (for example your shell profile).`);
+    } else if (pick !== add) {
+      return;
+    }
     const current = await readFile(file, 'utf8').catch(() => '');
     if (/^\s*\[mcp_servers\.bindb\]/m.test(current)) {
       vscode.window.showWarningMessage(`${file} already has [mcp_servers.bindb]. Edit it there, or use Copy Snippet.`);
@@ -201,6 +273,8 @@ export class AiIntegration implements vscode.Disposable {
 
   dispose(): void {
     void this.server.stop();
+    // 실행되지 않은 Claude Code 등록 명령의 토큰 임시 파일
+    for (const dir of this.tempDirs) rmSync(dir, { recursive: true, force: true });
     this.subs.forEach((s) => s.dispose());
     this.changed.dispose();
   }

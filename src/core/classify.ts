@@ -34,6 +34,13 @@ const SIDE_EFFECT_FUNCTIONS: Record<DriverId, string[]> = {
     'pg_rotate_logfile', 'pg_switch_wal', 'pg_create_restore_point', 'pg_advisory_lock', 'pg_advisory_xact_lock',
     'pg_notify', 'pg_promote', 'pg_logical_emit_message', 'txid_current', 'pg_current_xact_id', 'pg_file_write',
     'pg_read_file', 'pg_read_binary_file', 'pg_ls_dir', 'query_to_xml',
+    // 세션 잠금은 읽기 전용 트랜잭션에서도 잡히고, 롤백해도 풀리지 않는다
+    'pg_advisory_lock_shared', 'pg_advisory_xact_lock_shared', 'pg_try_advisory_lock', 'pg_try_advisory_lock_shared',
+    'pg_try_advisory_xact_lock', 'pg_try_advisory_xact_lock_shared',
+    // 통계 초기화 · 다른 서버 연결 · 복제 슬롯 · 대형 객체 만들기
+    'pg_stat_reset', 'pg_stat_reset_shared', 'pg_stat_reset_single_table_counters', 'pg_stat_reset_single_function_counters',
+    'pg_stat_statements_reset', 'dblink_connect', 'dblink_connect_u', 'pg_create_logical_replication_slot',
+    'pg_create_physical_replication_slot', 'pg_drop_replication_slot', 'pg_replication_slot_advance', 'lo_from_bytea',
   ],
   mysql: ['load_file', 'get_lock', 'release_lock', 'sleep', 'benchmark', 'sys_exec', 'sys_eval'],
   sqlite: ['load_extension', 'writefile', 'edit', 'fts3_tokenizer', 'readfile'],
@@ -44,6 +51,10 @@ const SIDE_EFFECT_FUNCTIONS: Record<DriverId, string[]> = {
 };
 
 const word = (t: Token | undefined) => (t && t.type === 'word' ? t.text.toUpperCase() : undefined);
+/** 열 이름 앞뒤 자리(낱말은 대문자, 기호는 그대로) */
+const nameKey = (t: Token | undefined) => (t ? (t.type === 'word' ? t.text.toUpperCase() : t.type === 'punct' ? t.text : '') : '');
+const NAME_BEFORE = new Set(['SELECT', 'DISTINCT', 'BY', 'WHERE', 'AND', 'OR', 'ON', ',', '=', '<', '>']);
+const NAME_AFTER = new Set(['FROM', 'AS', 'ASC', 'DESC', 'IS', 'IN', 'AND', 'OR', 'WHERE', 'ORDER', 'GROUP', 'LIMIT', ',', ')', '=', '<', '>', '+', '-', '*', '/']);
 /** 함수 이름으로 쓰일 수 있는 토큰의 이름: 낱말 또는 인용 식별자("FILE_WRITE"(…)도 같은 함수다) */
 const callee = (t: Token | undefined) => (t && (t.type === 'word' || t.type === 'quoted') ? identName(t).toLowerCase() : undefined);
 
@@ -61,8 +72,13 @@ const SQLITE_WRITE_PRAGMAS = new Set(['OPTIMIZE', 'INCREMENTAL_VACUUM', 'WAL_CHE
 /** 문장 하나를 판정한다 */
 function classifyOne(tokens: Token[], driver: DriverId): Classification {
   const code = tokens.filter((t) => t.type !== 'comment');
-  const first = word(code[0]);
-  if (!first) return { kind: 'empty' };
+  if (code.length === 0) return { kind: 'empty' };
+  // (SELECT …) UNION (SELECT …) 처럼 괄호로 시작하는 쿼리: 여는 괄호 뒤의 첫 낱말로 판정한다
+  let start = 0;
+  while (code[start]?.type === 'punct' && code[start].text === '(') start++;
+  const first = word(code[start]);
+  // 낱말로 시작하지 않는 모양은 모른다 — 읽기로 넘기지 않는다
+  if (!first) return { kind: 'write', reason: 'the statement does not start with a keyword' };
   if (TX.has(first)) {
     // BEGIN · START TRANSACTION은 읽기/쓰기 모드를 바꿀 수 있다 — READ WRITE는 쓰기로 본다
     if (code.some((t, i) => word(t) === 'READ' && word(code[i + 1]) === 'WRITE')) return { kind: 'write', reason: 'it opens a read-write transaction' };
@@ -92,7 +108,12 @@ function classifyOne(tokens: Token[], driver: DriverId): Classification {
     if (DML.has(w)) {
       // 함수 이름 · 열 이름이 아니라 키워드로 쓰였을 때만(다음이 "(" 이면 함수 · 표현식)
       const prev = code[i - 1];
-      const asName = (next?.type === 'punct' && next.text === '(' && w !== 'INSERT') || (prev?.type === 'punct' && prev.text === '.');
+      const asName =
+        (next?.type === 'punct' && next.text === '(' && w !== 'INSERT') ||
+        (prev?.type === 'punct' && prev.text === '.') ||
+        // SELECT copy, load FROM t · ORDER BY handler — 열 이름 자리. 읽기 문장 안의 진짜 쓰기는
+        // CTE 본문 AS (DELETE … · H2 FINAL TABLE (INSERT … 처럼 늘 "(" 뒤에 온다
+        (NAME_BEFORE.has(nameKey(prev)) && (next === undefined || NAME_AFTER.has(nameKey(next))));
       if (!asName) return { kind: 'write', reason: `it contains ${w}` };
     }
     // EXPLAIN ANALYZE는 문장을 실제로 실행한다

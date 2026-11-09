@@ -1,41 +1,32 @@
-import { spawn, type ChildProcess } from 'node:child_process';
-import { existsSync } from 'node:fs';
-import { createServer } from 'node:net';
+import { closeSync, existsSync, openSync, readSync } from 'node:fs';
 import * as path from 'node:path';
-import { Client } from 'pg';
-import { arrayCursor, emptyCursor } from './cursor';
-import { introspectInfoSchema } from './infoSchema';
 import { classifySql } from '../core/classify';
 import { resolvePath, resolveTarget } from './common';
-import { pgClientConfig, rawDateTypes } from './postgres';
+import { introspectInfoSchema } from './infoSchema';
+import { openJdbc, stopAllBridges, type JdbcSession } from './jdbc/bridge';
 import type { ConnectionConfig, ConnectOptions, Driver, QueryCursor, Session } from './types';
 
 /**
- * H2는 자바 DB라 Node 드라이버가 없다. 대신 H2가 내장한 PostgreSQL 와이어 프로토콜
- * 서버(-pg)에 pg 클라이언트로 붙는다.
- *  - 서버 모드: 이미 떠 있는 `org.h2.tools.Server -pg`에 접속(기본 포트 5435)
- *  - 파일 모드: cfg.file(.mv.db)을 열기 위해 h2 jar로 PG 서버를 직접 띄운다
- *
- * H2의 PG 서버는 포털을 나눠 읽는 확장 프로토콜을 제대로 지원하지 않아서
- * pg-cursor 대신 단순 쿼리로 전체 결과를 받는다.
+ * H2: JDBC 연동 모듈(필요할 때만 띄우는 JVM)로 H2 JDBC 드라이버에 직접 붙는다 — DataGrip · DBeaver와 같은 방식.
+ *  - Embedded(파일): jdbc:h2:file:<경로>;IFEXISTS=TRUE (없는 파일을 새로 만들지 않는다). .h2.db는 MV_STORE=FALSE
+ *  - Remote: H2 TCP 서버 jdbc:h2:tcp://host:port/db (기본 포트 9092)
+ *  - URL only: JDBC URL 그대로(jdbc:h2:mem:… 포함)
+ * 예전에는 H2의 PostgreSQL 프로토콜 서버(-pg)를 거쳤는데, 그 서버는 DATABASE_TO_LOWER=TRUE를 강제로 걸어서
+ * Java 앱이 기본 설정으로 만든 DB(스키마 PUBLIC)를 아예 열지 못했다(설계 점검 3번).
+ * Advanced 탭: VM options · VM environment · Working directory는 JVM에, 드라이버 옵션은 URL의 ;KEY=VALUE로.
  */
+
+/** 기본 JVM 옵션: 적은 메모리로 도는 GC. 사용자의 VM options가 뒤에 붙어 이긴다 */
+const DEFAULT_VM_ARGS = ['-XX:+UseSerialGC'];
+
 class H2Session implements Session {
-  private lostListeners: ((e: Error) => void)[] = [];
   constructor(
-    private readonly client: Client,
+    private readonly jdbc: JdbcSession,
     private readonly readOnly: boolean,
-    private readonly release?: () => void,
-  ) {
-    client.on('error', (e) => this.lostListeners.forEach((l) => l(e)));
-    client.on('end', () => {
-      // 연결이 끝나면(닫았든 끊겼든) 서버를 반납한다. release는 여러 번 불러도 한 번만 반영된다
-      this.release?.();
-      this.lostListeners.forEach((l) => l(new Error('The connection was closed.')));
-    });
-  }
+  ) {}
 
   onLost(listener: (e: Error) => void): void {
-    this.lostListeners.push(listener);
+    this.jdbc.onLost(listener);
   }
 
   async execute(sql: string, params?: readonly unknown[]): Promise<QueryCursor> {
@@ -44,39 +35,75 @@ class H2Session implements Session {
       const c = classifySql(sql, 'h2');
       if (c.kind === 'write') throw new Error(`Connection is read-only: ${c.reason ?? 'this statement may change data'}.`);
     }
-    const result = await this.client.query({ text: sql, rowMode: 'array', types: rawDateTypes, ...(params?.length ? { values: [...params] } : {}) });
-    if (!result.fields?.length) return emptyCursor(result.rowCount ?? undefined);
-    return arrayCursor(
-      result.fields.map((f) => ({ name: f.name })),
-      result.rows as unknown[][],
-    );
+    return this.jdbc.execute(sql, params);
   }
 
-  async cancel(): Promise<void> {
-    // H2 PG 서버는 CancelRequest를 무시한다.
+  cancel(): Promise<void> {
+    return this.jdbc.cancel();
   }
 
-  async close(): Promise<void> {
+  close(): Promise<void> {
+    return this.jdbc.close();
+  }
+}
+
+/** 연결 설정 → JDBC URL */
+export function h2JdbcUrl(cfg: ConnectionConfig, opts: ConnectOptions = {}): string {
+  const settings = Object.entries(cfg.driverOptions ?? {})
+    .filter(([k]) => k.trim())
+    .map(([k, v]) => `;${k.trim()}=${v}`)
+    .join('');
+  if (cfg.connectionType === 'url' && cfg.url) {
+    const url = cfg.url.trim();
+    return (/^jdbc:/i.test(url) ? url : `jdbc:${url}`) + settings;
+  }
+  const file = resolveTarget(cfg, opts).cfg.file;
+  if (file) {
+    const full = resolvePath(cfg, file);
+    // .h2.db = H2 1.3/1.4 PageStore(DataGrip의 Embedded 템플릿과 같은 MV_STORE=FALSE)
+    if (/\.h2\.db$/i.test(full)) return `jdbc:h2:file:${full.replace(/\.h2\.db$/i, '')};MV_STORE=FALSE;IFEXISTS=TRUE${settings}`;
+    return `jdbc:h2:file:${full.replace(/\.mv\.db$/i, '')};IFEXISTS=TRUE${settings}`;
+  }
+  const db = (cfg.database ?? '').trim();
+  if (!db) throw new Error('Set the H2 database (for example ~/test) for a remote connection.');
+  return `jdbc:h2:tcp://${cfg.host || 'localhost'}:${cfg.port ?? 9092}/${db}${settings}`;
+}
+
+/**
+ * H2 jar와 DB 파일의 형식이 맞는가. jar는 자기 형식만 연다(H2 1.4.200 · 2.1.214 · 2.3.232로 확인):
+ *   H2 1.4.x → format:1 · 2.0–2.1 → format:2 · 2.2 이상 → format:3 (.mv.db 첫 줄의 format:N)
+ * .h2.db는 H2 1.3/1.4의 PageStore 파일이다. 맞지 않으면 사람이 읽을 이유를, 맞거나 알 수 없으면 undefined.
+ */
+export function h2FileProblem(file: string, jar: string, header = readHeader(file)): string | undefined {
+  const v = /h2-(\d+)\.(\d+)\.(\d+)/i.exec(path.basename(jar));
+  if (/\.h2\.db$/i.test(file)) {
+    // 1.4 jar는 MV_STORE=FALSE로 PageStore를 연다(h2JdbcUrl). 2.x는 못 연다
+    if (!v || Number(v[1]) < 2) return undefined;
+    return `${path.basename(file)} is an H2 1.3/1.4 PageStore file. Open it with an H2 1.4.x jar (1.4.200), or migrate it to a .mv.db file with H2's SCRIPT / RUNSCRIPT.`;
+  }
+  const format = Number(/format:(\d+)/.exec(header)?.[1]);
+  if (!format || !v) return undefined;
+  const [major, minor] = [Number(v[1]), Number(v[2])];
+  const jarFormat = major < 2 ? 1 : minor < 2 ? 2 : 3;
+  if (format === jarFormat) return undefined;
+  const need = format === 1 ? '1.4.200' : format === 2 ? '2.1.214' : '2.2 or later (for example 2.3.232)';
+  return `${path.basename(file)} uses H2 file format ${format}, but ${path.basename(jar)} only opens format ${jarFormat}. Use an H2 ${need} jar (Drivers → H2 → Download), or migrate the file with SCRIPT / RUNSCRIPT.`;
+}
+
+function readHeader(file: string): string {
+  try {
+    const fd = openSync(file, 'r');
     try {
-      await this.client.end();
+      const buf = Buffer.alloc(256);
+      return buf.subarray(0, readSync(fd, buf, 0, 256, 0)).toString('latin1');
     } finally {
-      this.release?.();
+      closeSync(fd);
     }
+  } catch {
+    return '';
   }
 }
 
-function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const srv = createServer();
-    srv.once('error', reject);
-    srv.listen(0, '127.0.0.1', () => {
-      const port = (srv.address() as { port: number }).port;
-      srv.close(() => resolve(port));
-    });
-  });
-}
-
-/** h2 jar로 PG 서버를 띄우고, 포트가 열리면 돌려준다. */
 /** VM options 문자열 → 인자 배열. 셸처럼 공백으로 나누고, 따옴표 안의 공백은 나누지 않으며 따옴표는 뺀다 */
 export function splitArgs(text: string): string[] {
   const out: string[] = [];
@@ -110,141 +137,64 @@ export function parseEnv(text: string): Record<string, string> {
   return env;
 }
 
-async function launchFileServer(
-  jar: string,
-  dbFile: string,
-  cfg: ConnectionConfig,
-): Promise<{ server: ChildProcess; port: number; database: string }> {
-  const baseDir = path.dirname(dbFile);
-  const database = path.basename(dbFile).replace(/\.mv\.db$/i, '');
-  const port = await freePort();
-  // Advanced 탭: VM options는 java 인자 앞에, VM environment는 환경 변수에, Working directory는 작업 폴더로
-  const args = [...splitArgs(cfg.vmOptions ?? ''), '-cp', jar, 'org.h2.tools.Server', '-pg', '-pgPort', String(port), '-baseDir', baseDir];
-  const server = spawn('java', args, {
-    stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, ...parseEnv(cfg.vmEnvironment ?? '') },
-    cwd: cfg.workingDirectory || undefined,
-  });
-
-  await new Promise<void>((resolve, reject) => {
-    let output = '';
-    const timer = setTimeout(() => fail(new Error(`H2 server did not start in time.\n${output}`)), 15000);
-    const onData = (chunk: Buffer) => {
-      output += chunk.toString();
-      if (/PG server running/i.test(output)) {
-        clearTimeout(timer);
-        // 뜬 뒤에는 출력을 모으지 않는다(계속 자라지 않게). 흘려 버려야 파이프가 막히지 않는다
-        server.stdout!.off('data', onData);
-        server.stderr!.off('data', onData);
-        server.stdout!.resume();
-        server.stderr!.resume();
-        output = '';
-        resolve();
-      }
-    };
-    function fail(err: Error) {
-      clearTimeout(timer);
-      server.kill();
-      reject(err);
-    }
-    server.stdout!.on('data', onData);
-    server.stderr!.on('data', onData);
-    server.once('error', (e) => fail(new Error(`Could not run java: ${e.message}`)));
-    server.once('exit', (code) => fail(new Error(`H2 server exited (code ${code}).\n${output}`)));
-  });
-  return { server, port, database };
-}
-
-/** 실행 중인 H2 서버(파일 · jar · VM 설정이 같으면 함께 쓴다). 마지막 세션이 놓으면 끈다 */
-const servers = new Map<string, { started: Promise<{ server: ChildProcess; port: number; database: string }>; refs: number }>();
-/** 띄운 H2 서버 전부(확장 프로세스가 끝날 때 끈다 — 남겨 두면 VS Code를 꺼도 java가 돈다) */
-const launchedServers = new Set<ChildProcess>();
-process.once('exit', () => {
-  for (const s of launchedServers) s.kill();
-});
-
 /** 확장을 끌 때(deactivate) 부른다 */
 export function stopAllH2Servers(): void {
-  for (const s of launchedServers) s.kill();
-  launchedServers.clear();
-  servers.clear();
-}
-
-async function acquireServer(jar: string, file: string, cfg: ConnectionConfig): Promise<{ port: number; database: string; release: () => void }> {
-  const key = JSON.stringify([jar, file, cfg.vmOptions ?? '', cfg.vmEnvironment ?? '', cfg.workingDirectory ?? '']);
-  let entry = servers.get(key);
-  if (!entry) {
-    const started = launchFileServer(jar, file, cfg);
-    const created = { started, refs: 0 };
-    entry = created;
-    servers.set(key, created);
-    started.then(
-      ({ server }) => {
-        launchedServers.add(server);
-        server.once('exit', () => {
-          launchedServers.delete(server);
-          if (servers.get(key) === created) servers.delete(key);
-        });
-      },
-      () => servers.get(key) === created && servers.delete(key),
-    );
-  }
-  entry.refs++;
-  let launched;
-  try {
-    launched = await entry.started;
-  } catch (e) {
-    entry.refs--;
-    throw e;
-  }
-  const e = entry;
-  let released = false;
-  return {
-    port: launched.port,
-    database: launched.database,
-    release: () => {
-      if (released) return;
-      released = true;
-      if (--e.refs <= 0) {
-        if (servers.get(key) === e) servers.delete(key);
-        launched.server.kill();
-      }
-    },
-  };
+  stopAllBridges();
 }
 
 export const h2Driver: Driver = {
   id: 'h2',
   label: 'H2',
-  defaultPort: 5435,
+  defaultPort: 9092,
   quote: '"',
   defaultSchema: () => 'PUBLIC',
 
   async connect(cfg: ConnectionConfig, opts: ConnectOptions) {
-    let release: (() => void) | undefined;
-    let target = cfg;
-    const resolved = resolveTarget(cfg, opts).cfg;
+    if (!opts.h2Jar) throw new Error('Set the H2 driver jar (Drivers → H2, or "bindb.h2.jarPath") to connect to H2.');
+    const { cfg: resolved, password } = resolveTarget(cfg, opts);
     if (resolved.file) {
-      if (!opts.h2Jar) throw new Error('Set "bindb.h2.jarPath" to an h2-*.jar to open H2 database files.');
-      // 없는 파일이면 빈 DB를 새로 만들지 않고 알린다(경로를 잘못 쓴 경우)
-      if (!existsSync(resolvePath(cfg, resolved.file))) throw new Error(`H2 database file not found: ${resolvePath(cfg, resolved.file)}`);
-      // 같은 파일은 H2 서버 하나를 함께 쓴다 — 파일을 두 서버가 열면 잠금에 걸린다
-      const shared = await acquireServer(opts.h2Jar, resolvePath(cfg, resolved.file), cfg);
-      release = shared.release;
-      target = { ...cfg, host: '127.0.0.1', port: shared.port, database: shared.database };
+      const file = resolvePath(cfg, resolved.file);
+      const exists = existsSync(file);
+      // Embedded: 없는 파일이면 빈 DB를 새로 만들지 않고 알린다(경로를 잘못 쓴 경우). URL only는 URL을 따른다(IFEXISTS)
+      if (!exists && cfg.connectionType !== 'url') throw new Error(`H2 database file not found: ${file}`);
+      // jar가 그 파일 형식을 못 열면 H2 오류가 알아보기 어렵다 — 먼저 알린다
+      const problem = exists ? h2FileProblem(file, opts.h2Jar) : undefined;
+      if (problem) throw new Error(problem);
     }
-    const client = new Client({ ...pgClientConfig(target, opts), port: target.port ?? 5435 });
+    const open = (url: string) =>
+      openJdbc(
+        {
+          vmArgs: [...DEFAULT_VM_ARGS, ...splitArgs(cfg.vmOptions ?? '')],
+          env: parseEnv(cfg.vmEnvironment ?? ''),
+          cwd: cfg.workingDirectory || undefined,
+        },
+        {
+          jars: [opts.h2Jar!],
+          driver: 'org.h2.Driver',
+          url,
+          props: { user: resolved.user ?? cfg.user ?? '', password: password ?? '' },
+          readOnly: !!cfg.readOnly,
+        },
+      );
+    const url = h2JdbcUrl(cfg, opts);
+    let jdbc: JdbcSession;
     try {
-      await client.connect();
+      jdbc = await open(url);
     } catch (e) {
-      release?.();
-      throw e;
+      // 다른 프로그램(앱)이 Embedded로 연 파일 — 함께 쓰는 방법을 알려 준다
+      if (/already in use/i.test((e as Error).message) && !/AUTO_SERVER/i.test(url)) {
+        throw new Error(`${(e as Error).message.split('\n')[0]}\nAnother program has this H2 file open. To use it from both, add AUTO_SERVER=TRUE to that program's URL and to this data source (Advanced → driver options).`);
+      }
+      // PostgreSQL 모드(이름을 소문자로)로 만든 DB — 예전 BindB가 H2 PG 서버로 만든 파일이 이렇다.
+      // 기본 설정으로 열면 스키마 public을 못 찾는다. 그 서버가 걸던 설정 그대로 다시 연다
+      if (!resolved.file || /DATABASE_TO_LOWER/i.test(url) || !/Schema "public" not found/.test((e as Error).message)) throw e;
+      jdbc = await open(`${url};MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DEFAULT_NULL_ORDERING=HIGH`);
     }
-    return new H2Session(client, !!cfg.readOnly, release);
+    return new H2Session(jdbc, !!cfg.readOnly);
   },
 
   introspect(session, cfg) {
-    // H2의 PG 서버는 이름을 소문자로 돌려주고 pg_catalog도 흉내 낸다. 대소문자 없이 거른다.
+    // PG 모드로 만든 DB에는 pg_catalog도 있다. 대소문자 없이 거른다.
     return introspectInfoSchema(
       session,
       cfg.showSystemSchemas ? '1 = 1' : `UPPER(table_schema) NOT IN ('INFORMATION_SCHEMA', 'PG_CATALOG')`,

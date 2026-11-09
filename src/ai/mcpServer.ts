@@ -227,6 +227,10 @@ export class BindbMcpServer {
   }
 
   private async handle(req: IncomingMessage, res: ServerResponse, expected: Buffer): Promise<void> {
+    if (!isLocalRequest(req.headers.host, req.headers.origin, req.socket.localPort ?? 0)) {
+      res.writeHead(403, { 'content-type': 'application/json' }).end(JSON.stringify({ error: 'forbidden origin' }));
+      return;
+    }
     const auth = Buffer.from(String(req.headers.authorization ?? ''));
     if (auth.length !== expected.length || !timingSafeEqual(auth, expected)) {
       res.writeHead(401, { 'content-type': 'application/json' }).end(JSON.stringify({ error: 'unauthorized' }));
@@ -250,6 +254,18 @@ export class BindbMcpServer {
       if (!res.headersSent) res.writeHead(500).end(String(e));
     }
   }
+}
+
+/**
+ * Streamable HTTP 서버는 Origin을 확인해야 한다(MCP 명세 2025-06-18 basic/transports, MUST):
+ * 브라우저 페이지가 자기 도메인을 127.0.0.1로 돌려(DNS 리바인딩) 이 서버에 요청할 수 있다.
+ *  - Host: 이 포트의 127.0.0.1 · localhost만
+ *  - Origin: 없거나(CLI · 확장 클라이언트는 보내지 않는다) 같은 로컬 주소만
+ */
+export function isLocalRequest(host: string | undefined, origin: string | undefined, port: number): boolean {
+  const local = [`127.0.0.1:${port}`, `localhost:${port}`];
+  if (!host || !local.includes(host.toLowerCase())) return false;
+  return origin === undefined || local.some((h) => origin.toLowerCase() === `http://${h}`);
 }
 
 export function newToken(): string {

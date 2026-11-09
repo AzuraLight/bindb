@@ -1,7 +1,14 @@
 export type DriverId = 'postgres' | 'mysql' | 'sqlite' | 'h2';
 
-/** disable: 평문 / require: 암호화만(인증서 검사 안 함) / verify: 암호화 + 인증서 검사 */
-export type SslMode = 'disable' | 'require' | 'verify';
+/**
+ * libpq sslmode · MySQL ssl-mode와 같은 뜻(https://www.postgresql.org/docs/current/libpq-ssl.html):
+ *  - disable: 평문
+ *  - prefer: SSL을 먼저 시도하고, 서버가 SSL을 지원하지 않으면 평문
+ *  - require: 암호화만(인증서 검사 안 함). CA 파일을 주면 verify-ca처럼 동작한다(libpq와 같다)
+ *  - verify-ca: 인증서가 믿는 CA로 서명됐는지(호스트 이름은 보지 않는다)
+ *  - verify: verify-full — 인증서 + 호스트 이름
+ */
+export type SslMode = 'disable' | 'prefer' | 'require' | 'verify-ca' | 'verify';
 
 export interface ConnectionConfig {
   id: string;
@@ -152,7 +159,9 @@ export interface ConnectOptions {
   realTarget?: { host: string; port: number };
   /** 처음 보는 SSH 호스트 키를 믿을지 묻는다(Strict host key checking · Ask) */
   askHostKey?: (host: string, fingerprint: string) => Promise<boolean>;
-  /** known_hosts 파일(테스트용). 없으면 ~/.ssh/known_hosts */
+  /** SSH keyboard-interactive(2FA · PAM): 서버가 묻는 것을 사용자에게 묻는다. 취소하면 undefined */
+  askKeyboard?: (title: string, prompts: { prompt: string; echo: boolean }[]) => Promise<string[] | undefined>;
+  /** known_hosts 파일(테스트용). 없으면 ~/.ssh/known_hosts와 /etc/ssh/ssh_known_hosts */
   knownHostsFile?: string;
   /** ~/.ssh/config 파일(테스트용) */
   sshConfigFile?: string;
@@ -180,7 +189,7 @@ export interface QueryCursor {
 export interface Session {
   /** 서버가 연결을 끊었을 때(네트워크 · 서버 종료). 이후 이 세션은 쓸 수 없다 */
   onLost?(listener: (error: Error) => void): void;
-  /** params: 매개변수 값(postgres · h2는 $1…, mysql · sqlite는 ?) */
+  /** params: 매개변수 값(postgres는 $1…, mysql · sqlite · h2는 ?) */
   execute(sql: string, params?: readonly unknown[]): Promise<QueryCursor>;
   cancel(): Promise<void>;
   close(): Promise<void>;

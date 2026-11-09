@@ -120,7 +120,8 @@
         "bindb.h2.jarPath": {
           "type": "string",
           "default": "",
-          "description": "Path to h2-*.jar. Used to open H2 database files (requires java on PATH)."
+          "description": "Path to the H2 JDBC driver (h2-*.jar). BindB runs it in a Java process (Java 11+, JAVA_HOME or java on PATH) only while an H2 connection is open.",
+          "scope": "machine"
         },
         "bindb.grid.pageSize": {
           "type": "number",
@@ -131,19 +132,22 @@
         "bindb.ai.mcpServer.enabled": {
           "type": "boolean",
           "default": false,
-          "description": "Run a local MCP server (127.0.0.1, token required) so AI agents — Copilot agent mode, Claude Code, Codex — can read schemas and run read-only queries on BindB connections."
+          "description": "Run a local MCP server (127.0.0.1, token required) so AI agents — Copilot agent mode, Claude Code, Codex — can read schemas and run read-only queries on BindB connections.",
+          "scope": "application"
         },
         "bindb.ai.mcpServer.port": {
           "type": "number",
           "default": 47863,
           "minimum": 1024,
           "maximum": 65535,
-          "description": "Port of the local MCP server."
+          "description": "Port of the local MCP server.",
+          "scope": "application"
         },
         "bindb.ai.allowWrites": {
           "type": "boolean",
           "default": false,
-          "description": "Let AI tools run statements that change data or schema (each one still needs your confirmation; read-only connections are never written)."
+          "description": "Let AI tools run statements that change data or schema (each one still needs your confirmation; read-only connections are never written).",
+          "scope": "application"
         },
         "bindb.ssh.configurations": {
           "type": "array",
@@ -201,7 +205,8 @@
                 ]
               }
             }
-          }
+          },
+          "scope": "application"
         },
         "bindb.dataSourceTemplates": {
           "type": "array",
@@ -692,6 +697,7 @@
   },
   "scripts": {
     "build": "node esbuild.mjs",
+    "build:java": "node scripts/build-java.mjs",
     "watch": "node esbuild.mjs --watch",
     "typecheck": "tsc --noEmit -p . && tsc --noEmit -p webview",
     "test": "node --import tsx --test test/*.test.ts",
