@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import { resolvePath, resolveTarget } from './common';
 import { BufferedCursor, emptyCursor, queryAll } from './cursor';
 import type { Request, Response } from './sqliteHost';
+import { attachForeignKeys } from './infoSchema';
 import { levelsBySchema } from './introspection';
 import type { Driver, MetaTable, QueryCursor, Session } from './types';
 
@@ -208,8 +209,16 @@ export const sqliteDriver: Driver = {
     // main은 늘 현재 스키마. 1단계: 열 이름만(타입 · 기본키 없음)
     const level = levelsBySchema(cfg, objects.map(() => 'main'), 'main', () => false).get('main') ?? 3;
     const out: MetaTable[] = [];
+    const fkRows: unknown[][] = [];
     for (const [name, type] of objects) {
-      const cols = await queryAll(session, `SELECT name, type, pk FROM pragma_table_info('${String(name).replace(/'/g, "''")}')`);
+      const lit = `'${String(name).replace(/'/g, "''")}'`;
+      const cols = await queryAll(session, `SELECT name, type, pk FROM pragma_table_info(${lit})`);
+      // 외래 키(2단계부터): id = 제약, seq = 순번, to가 NULL이면 참조 테이블의 기본키
+      if (level > 1 && type !== 'view') {
+        for (const [id, seq, refTable, from, to] of await queryAll(session, `SELECT id, seq, "table", "from", "to" FROM pragma_foreign_key_list(${lit})`).catch(() => [])) {
+          fkRows.push(['main', name, `fk${id}`, from, 'main', refTable, to, seq]);
+        }
+      }
       out.push({
         schema: 'main',
         name: String(name),
@@ -226,6 +235,20 @@ export const sqliteDriver: Driver = {
             : [],
       });
     }
+    // REFERENCES t 처럼 열을 안 쓴 외래 키는 t의 기본키를 가리킨다
+    const byName = new Map(out.map((t) => [t.name.toLowerCase(), t]));
+    const resolved: unknown[][] = [];
+    for (const r of fkRows) {
+      if (r[6] != null) resolved.push(r);
+      else {
+        const pk = byName.get(String(r[5]).toLowerCase())?.primaryKey ?? [];
+        const col = pk[Number(r[7])];
+        if (col) resolved.push([...r.slice(0, 6), col, r[7]]);
+      }
+    }
+    // pragma가 돌려주는 참조 테이블 이름은 쓴 그대로라 실제 이름으로 맞춘다
+    for (const r of resolved) r[5] = byName.get(String(r[5]).toLowerCase())?.name ?? r[5];
+    attachForeignKeys(new Map(out.map((t) => [`main\u0000${t.name}`, t])), resolved);
     return out;
   },
 };

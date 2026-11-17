@@ -184,6 +184,21 @@ describe('H2 through the JDBC bridge (real Java)', { skip: !(java && jar) && 'se
     await s.close();
   });
 
+  it('reads foreign keys through information_schema and through JDBC metadata', async () => {
+    await create('fkdb', '', [
+      'CREATE TABLE PAIRS (A INT, B INT, PRIMARY KEY (B, A))',
+      'CREATE TABLE CUSTOMER (ID INT PRIMARY KEY)',
+      'CREATE TABLE ORDERS (ID INT, CUST INT REFERENCES CUSTOMER(ID), PA INT, PB INT, FOREIGN KEY (PA, PB) REFERENCES PAIRS (A, B))',
+    ]);
+    const s = await h2Driver.connect(file('fkdb'), opts);
+    for (const patch of [{}, { introspectJdbc: true }]) {
+      const meta = await h2Driver.introspect(s, file('fkdb', patch));
+      const fk = meta.find((t) => t.name === 'ORDERS')?.foreignKeys?.map((k) => `${k.columns}->${k.refSchema}.${k.refTable}(${k.refColumns})`).sort();
+      assert.deepEqual(fk, ['CUST->PUBLIC.CUSTOMER(ID)', 'PA,PB->PUBLIC.PAIRS(A,B)'], JSON.stringify(patch));
+    }
+    await s.close();
+  });
+
   it('a killed Java process is reported as a lost connection', async () => {
     const s = await h2Driver.connect(file('javaapp'), opts);
     const lost: string[] = [];

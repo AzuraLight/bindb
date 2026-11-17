@@ -1,7 +1,7 @@
 import { closeSync, existsSync, openSync, readSync } from 'node:fs';
 import * as path from 'node:path';
 import { resolvePath, resolveTarget } from './common';
-import { introspectInfoSchema } from './infoSchema';
+import { attachForeignKeys, introspectInfoSchema, STANDARD_FOREIGN_KEYS } from './infoSchema';
 import { openJdbc, stopAllBridges, type JdbcSession } from './jdbc/bridge';
 import type { ConnectionConfig, ConnectOptions, Driver, IsolationLevel, JdbcMetadata, MetaTable, QueryCursor, Session } from './types';
 import { queryAll } from './cursor';
@@ -170,6 +170,15 @@ async function introspectJdbc(session: Session, cfg: ConnectionConfig): Promise<
   for (const [schema, table, column] of [...md.keys].sort((a, b) => a[3] - b[3])) {
     const t = byKey.get(`${schema}\u0000${table}`);
     if (t && (t.level ?? 3) >= 2) (t.primaryKey ??= []).push(column);
+  }
+  // 외래 키: H2 1.x는 INFORMATION_SCHEMA.CROSS_REFERENCES, 2.x는 표준 뷰
+  if ([...levels.values()].some((l) => l >= 2)) {
+    const rows = await queryAll(
+      session,
+      `SELECT FKTABLE_SCHEMA, FKTABLE_NAME, FK_NAME, FKCOLUMN_NAME, PKTABLE_SCHEMA, PKTABLE_NAME, PKCOLUMN_NAME, ORDINAL_POSITION
+         FROM INFORMATION_SCHEMA.CROSS_REFERENCES`,
+    ).catch(() => queryAll(session, STANDARD_FOREIGN_KEYS).catch(() => [] as unknown[][]));
+    attachForeignKeys(byKey, rows);
   }
   if ([...byKey.values()].some((t) => t.kind === 'view' && loadsSources(cfg, t.level ?? 3, isH2System(t.schema)))) {
     const views = await queryAll(session, 'SELECT TABLE_SCHEMA, TABLE_NAME, VIEW_DEFINITION FROM INFORMATION_SCHEMA.VIEWS').catch(() => []);

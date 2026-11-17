@@ -231,6 +231,15 @@ export interface JdbcMetadata {
   keys: [string, string, string, number][];
 }
 
+/** DB에 정의된 외래 키. columns[i]가 refColumns[i]를 가리킨다 */
+export interface ForeignKeyMeta {
+  name?: string;
+  columns: string[];
+  refSchema: string;
+  refTable: string;
+  refColumns: string[];
+}
+
 export interface MetaTable {
   schema: string;
   name: string;
@@ -238,6 +247,8 @@ export interface MetaTable {
   columns: ColumnMeta[];
   /** 기본키 열(순서대로). 없으면 빈 배열 · undefined */
   primaryKey?: string[];
+  /** 이 테이블에서 나가는 외래 키(2단계부터) */
+  foreignKeys?: ForeignKeyMeta[];
   /** 뷰 정의(Load sources for) */
   definition?: string;
   /** 이 객체를 읽은 수준(1 = 이름만이라 열 타입이 없다) */

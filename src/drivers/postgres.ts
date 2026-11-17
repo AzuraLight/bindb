@@ -110,6 +110,24 @@ export function sendCancelRequest(host: string, port: number, pid: number, key: 
  * pg_matviews · pg_attribute에서 읽어 뷰로 더한다(읽기 전용, 정의는 Load sources for를 따른다).
  * https://www.postgresql.org/docs/current/view-pg-matviews.html
  */
+/**
+ * 외래 키는 pg_catalog에서 읽는다: information_schema의 제약 뷰는 소유했거나 권한 있는 테이블만 보여 주고,
+ * 제약 이름이 스키마 안에서 겹칠 수 있어(테이블마다 고유) 표준 조인이 행을 섞는다.
+ * conkey · confkey를 같은 순번으로 펼친다.
+ */
+const PG_FOREIGN_KEYS = `
+  SELECT n.nspname AS table_schema, c.relname AS table_name, con.conname, a.attname,
+         rn.nspname AS ref_schema, rc.relname AS ref_table, ra.attname AS ref_column, k.ord
+    FROM pg_constraint con
+    JOIN pg_class c ON c.oid = con.conrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    JOIN pg_class rc ON rc.oid = con.confrelid
+    JOIN pg_namespace rn ON rn.oid = rc.relnamespace
+    CROSS JOIN LATERAL unnest(con.conkey, con.confkey) WITH ORDINALITY AS k(col, refcol, ord)
+    JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.col
+    JOIN pg_attribute ra ON ra.attrelid = con.confrelid AND ra.attnum = k.refcol
+   WHERE con.contype = 'f'`;
+
 async function materializedViews(
   session: Session,
   filter: string,
@@ -268,7 +286,7 @@ export const postgresDriver: Driver = {
       ? `table_schema NOT LIKE 'pg\\_temp%'`
       : `table_schema NOT IN ('pg_catalog', 'information_schema') AND table_schema NOT LIKE 'pg\\_toast%' AND table_schema NOT LIKE 'pg\\_temp%'`;
     const isSystem = (s: string) => /^(pg_catalog|information_schema|pg_toast.*)$/.test(s);
-    const tables = await introspectInfoSchema(session, filter, cfg, isSystem, 'public');
+    const tables = await introspectInfoSchema(session, filter, cfg, isSystem, 'public', PG_FOREIGN_KEYS);
     const known = new Map(tables.map((t) => [t.schema, t.level ?? 3] as const));
     return [...tables, ...(await materializedViews(session, filter, cfg, isSystem, known))];
   },

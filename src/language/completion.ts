@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { systemCatalog } from './systemCatalog';
-import { joinCondition, tableKey } from '../core/virtual';
+import { emptyVirtual, joinConditions, realForeignKeys, tableKey } from '../core/virtual';
 import type { VirtualStore } from '../ui/virtualObjects';
 import type { ConnectionStore } from '../core/connections';
 import type { SessionManager } from '../core/sessions';
@@ -73,26 +73,36 @@ export class SqlCompletionProvider implements vscode.CompletionItemProvider {
       }
     }
 
-    // 가상 외래키: `JOIN b ON |` 에서 앞 테이블과 잇는 조건을 제안한다
-    if (ctx.kind === 'column' && !ctx.qualifier && cfg && this.virtual && ctx.refs.length >= 2) {
+    // 외래 키(DB에 정의된 것 · 가상): `JOIN b ON |` 에서 앞 테이블과 잇는 조건을 제안한다
+    if (ctx.kind === 'column' && !ctx.qualifier && cfg && ctx.refs.length >= 2) {
       const before = doc.getText(new vscode.Range(position.with(undefined, 0), position));
       if (/\bON\s+\w*$/i.test(before)) {
-        const v = await this.virtual.get(cfg).catch(() => undefined);
+        const virtual = this.virtual ? await this.virtual.get(cfg).catch(() => undefined) : undefined;
+        const sources = [
+          { label: 'foreign key', v: { ...emptyVirtual(), foreignKeys: realForeignKeys(tables) } },
+          ...(virtual ? [{ label: 'virtual foreign key', v: virtual }] : []),
+        ];
         const last = ctx.refs[ctx.refs.length - 1];
         const right = resolveRef(last, tables, defaultSchema);
+        const seen = new Set<string>();
         for (const ref of ctx.refs.slice(0, -1)) {
           const left = resolveRef(ref, tables, defaultSchema);
-          if (!v || !left || !right) continue;
-          const cond = joinCondition(
-            v,
-            { table: tableKey(left.schema, left.name), alias: ref.alias ?? ref.name },
-            { table: tableKey(right.schema, right.name), alias: last.alias ?? last.name },
-          );
-          if (!cond) continue;
-          const item = new vscode.CompletionItem(cond, vscode.CompletionItemKind.Reference);
-          item.detail = 'virtual foreign key';
-          item.sortText = `0${cond}`;
-          items.push(item);
+          if (!left || !right) continue;
+          for (const { label, v } of sources) {
+            const conds = joinConditions(
+              v,
+              { table: tableKey(left.schema, left.name), alias: ref.alias ?? ref.name },
+              { table: tableKey(right.schema, right.name), alias: last.alias ?? last.name },
+            );
+            for (const cond of conds) {
+              if (seen.has(cond)) continue;
+              seen.add(cond);
+              const item = new vscode.CompletionItem(cond, vscode.CompletionItemKind.Reference);
+              item.detail = label;
+              item.sortText = `0${cond}`;
+              items.push(item);
+            }
+          }
         }
       }
     }

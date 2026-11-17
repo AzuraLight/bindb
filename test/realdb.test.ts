@@ -61,6 +61,28 @@ describe('PostgreSQL (real server)', { skip: !pgAt && 'set BINDB_TEST_PG=host:po
     }
   });
 
+  it('reads foreign keys from pg_catalog: composite, cross-schema, two to the same table', async () => {
+    await queryAll(s, 'DROP SCHEMA IF EXISTS bindb_fk CASCADE');
+    for (const q of [
+      'CREATE SCHEMA bindb_fk',
+      'CREATE TABLE bindb_fk.users (id int PRIMARY KEY)',
+      'CREATE TABLE bindb_fk.pairs (a int, b int, PRIMARY KEY (b, a))',
+      'CREATE TABLE public.bindb_orders (id int, created_by int REFERENCES bindb_fk.users, updated_by int REFERENCES bindb_fk.users(id), pa int, pb int, CONSTRAINT p FOREIGN KEY (pa, pb) REFERENCES bindb_fk.pairs (a, b))',
+      // 다른 테이블의 같은 이름 제약(PostgreSQL은 테이블마다 고유) — 섞이지 않아야 한다
+      'CREATE TABLE bindb_fk.other (x int, y int, CONSTRAINT p FOREIGN KEY (y, x) REFERENCES bindb_fk.pairs (a, b))',
+    ]) await queryAll(s, q);
+    try {
+      const meta = await postgresDriver.introspect(s, { id: 't', name: 't', driver: 'postgres' } as ConnectionConfig);
+      const fks = (schema: string, name: string) =>
+        meta.find((t) => t.schema === schema && t.name === name)?.foreignKeys?.map((k) => `${k.columns}->${k.refSchema}.${k.refTable}(${k.refColumns})`).sort();
+      assert.deepEqual(fks('public', 'bindb_orders'), ['created_by->bindb_fk.users(id)', 'pa,pb->bindb_fk.pairs(a,b)', 'updated_by->bindb_fk.users(id)']);
+      assert.deepEqual(fks('bindb_fk', 'other'), ['y,x->bindb_fk.pairs(a,b)']);
+    } finally {
+      await queryAll(s, 'DROP TABLE public.bindb_orders');
+      await queryAll(s, 'DROP SCHEMA bindb_fk CASCADE');
+    }
+  });
+
   it('still runs COPY to a server file', async () => {
     assert.equal((await run(s, "COPY (SELECT 1) TO '/dev/null'")).affected, 1);
   });
@@ -268,6 +290,14 @@ describe('MySQL (real server)', { skip: !myAt && 'set BINDB_TEST_MYSQL=host:port
     await queryAll(s, isolationSql({ driver: 'mysql', isolation: 'readCommitted' })!);
     assert.deepEqual(await queryAll(s, 'SELECT @@transaction_isolation'), [['READ-COMMITTED']]);
     await queryAll(s, 'SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ');
+  });
+
+  it('reads foreign keys from key_column_usage', async () => {
+    await queryAll(s, 'CREATE TABLE fk_pairs (a int, b int, PRIMARY KEY (b, a))');
+    await queryAll(s, 'CREATE TABLE fk_child (id int, x int, y int, e int, FOREIGN KEY (x, y) REFERENCES fk_pairs (b, a), FOREIGN KEY (e) REFERENCES e1 (id))');
+    const meta = await mysqlDriver.introspect(s, cfg);
+    const fk = meta.find((t) => t.name === 'fk_child')?.foreignKeys?.map((k) => `${k.columns}->${k.refSchema}.${k.refTable}(${k.refColumns})`).sort();
+    assert.deepEqual(fk, ['e->bindb_test.e1(id)', 'x,y->bindb_test.fk_pairs(b,a)']);
   });
 
   it('plain statements are unchanged', async () => {

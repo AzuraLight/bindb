@@ -33,6 +33,29 @@ describe('sqlite driver', () => {
     await s.close();
   });
 
+  it('reads foreign keys: composite, implicit primary key, several between the same tables', async () => {
+    const file = path.join(dir, 'fk.db');
+    for (const sql of [
+      'CREATE TABLE Users (id INTEGER PRIMARY KEY, name TEXT)',
+      'CREATE TABLE pairs (a INT, b INT, PRIMARY KEY (b, a))',
+      'CREATE TABLE orders (id INT, created_by INT REFERENCES users(id), updated_by INT REFERENCES USERS, pa INT, pb INT, FOREIGN KEY (pb, pa) REFERENCES pairs)',
+      'CREATE VIEW v AS SELECT * FROM orders',
+    ]) await exec(file, sql);
+    const s = await sqliteDriver.connect(cfg(file), {});
+    try {
+      const meta = await sqliteDriver.introspect(s, cfg(file));
+      const fks = (name: string) => meta.find((t) => t.name === name)?.foreignKeys?.map((k) => `${k.columns}->${k.refSchema}.${k.refTable}(${k.refColumns})`).sort();
+      assert.deepEqual(fks('orders'), ['created_by->main.Users(id)', 'pb,pa->main.pairs(b,a)', 'updated_by->main.Users(id)']);
+      assert.equal(fks('Users'), undefined);
+      assert.equal(fks('v'), undefined);
+      // 1단계는 열 이름만 — 외래 키도 없다
+      const lvl1 = await sqliteDriver.introspect(s, { ...cfg(file), introspectionLevel: 1 } as ConnectionConfig);
+      assert.equal(lvl1.find((t) => t.name === 'orders')?.foreignKeys, undefined);
+    } finally {
+      await s.close();
+    }
+  });
+
   it('writes changes back to the file and reports affected rows', async () => {
     const file = path.join(dir, 'rw.db');
     await exec(file, 'CREATE TABLE t(a)');

@@ -120,3 +120,23 @@ describe('dialects', () => {
     assert.deepEqual(problems('INSERT INTO users (id) SELECT id FROM nope', 'sqlite'), ['nope']);
   });
 });
+
+describe('foreign keys for JOIN completion', () => {
+  it('turns metadata foreign keys into join conditions, one per key, either direction', async () => {
+    const { joinConditions, realForeignKeys, emptyVirtual } = await import('../src/core/virtual');
+    const tables: MetaTable[] = [
+      { schema: 'public', name: 'users', kind: 'table', columns: [] },
+      {
+        schema: 'public', name: 'orders', kind: 'table', columns: [],
+        foreignKeys: [
+          { columns: ['created_by'], refSchema: 'public', refTable: 'users', refColumns: ['id'] },
+          { columns: ['updated_by'], refSchema: 'public', refTable: 'users', refColumns: ['id'] },
+        ],
+      },
+    ];
+    const v = { ...emptyVirtual(), foreignKeys: realForeignKeys(tables) };
+    assert.deepEqual(joinConditions(v, { table: 'public.users', alias: 'u' }, { table: 'public.orders', alias: 'o' }), ['o.created_by = u.id', 'o.updated_by = u.id']);
+    assert.deepEqual(joinConditions(v, { table: 'public.orders', alias: 'o' }, { table: 'PUBLIC.USERS', alias: 'u' }), ['o.created_by = u.id', 'o.updated_by = u.id']);
+    assert.deepEqual(joinConditions(v, { table: 'public.users', alias: 'a' }, { table: 'public.users', alias: 'b' }), []);
+  });
+});

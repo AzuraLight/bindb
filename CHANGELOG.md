@@ -10,6 +10,11 @@
   Only already-loaded metadata is used (no connection is opened for this). Schemas that were not
   introspected, CTEs, objects created earlier in the same file, table functions and subqueries are not
   judged. Unqualified columns are not checked yet. Setting: `bindb.diagnostics.unresolvedReferences`.
+- **Foreign keys are read from the database** (introspection level 2 and up) for PostgreSQL (`pg_catalog`,
+  so tables you do not own are included), MySQL, SQLite (`REFERENCES t` without columns resolves to t's
+  primary key) and H2 (information_schema, or `CROSS_REFERENCES` with JDBC metadata / H2 1.x).
+  `JOIN … ON` completion now suggests them without virtual foreign keys, one suggestion per key when two
+  tables are linked more than once (e.g. `created_by` and `updated_by`).
 
 ## 0.3.0 — 2026-11-09
 

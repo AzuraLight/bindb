@@ -190,6 +190,10 @@ export const mysqlDriver: Driver = {
       cfg,
       (s) => /^(mysql|information_schema|performance_schema|sys)$/i.test(s),
       mysqlDriver.defaultSchema(cfg),
+      // MySQL은 key_column_usage에 참조 대상 열이 바로 있다
+      `SELECT table_schema, table_name, constraint_name, column_name,
+              referenced_table_schema, referenced_table_name, referenced_column_name, ordinal_position
+         FROM information_schema.key_column_usage WHERE referenced_table_name IS NOT NULL`,
     );
   },
 };

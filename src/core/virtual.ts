@@ -1,5 +1,6 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
+import type { MetaTable } from '../drivers/types';
 
 /*
  * Virtual objects and attributes (DataGrip Options · Introspection). DB에는 저장하지 않고 BindB에만 있는 객체.
@@ -63,15 +64,28 @@ export function foreignKeysOf(v: VirtualObjects, table: string): VirtualForeignK
   return v.foreignKeys.filter((k) => same(k.table, table) || same(k.refTable, table));
 }
 
-/** 두 테이블을 잇는 JOIN 조건(가상 외래키로). a · b는 별칭 또는 이름 */
-export function joinCondition(v: VirtualObjects, left: { table: string; alias: string }, right: { table: string; alias: string }): string | undefined {
+/** 메타데이터의 외래 키를 가상 외래 키와 같은 모양으로(JOIN 조건 만들기에 함께 쓴다) */
+export function realForeignKeys(tables: readonly MetaTable[]): VirtualForeignKey[] {
+  return tables.flatMap((t) =>
+    (t.foreignKeys ?? []).map((k) => ({ table: tableKey(t.schema, t.name), columns: k.columns, refTable: tableKey(k.refSchema, k.refTable), refColumns: k.refColumns })),
+  );
+}
+
+/** 두 테이블을 잇는 JOIN 조건들(외래 키마다 하나). a · b는 별칭 또는 이름 */
+export function joinConditions(v: VirtualObjects, left: { table: string; alias: string }, right: { table: string; alias: string }): string[] {
+  const out: string[] = [];
   for (const k of v.foreignKeys) {
     const pair = (from: typeof left, to: typeof right) =>
       k.columns.map((c, i) => `${from.alias}.${c} = ${to.alias}.${k.refColumns[i]}`).join(' AND ');
-    if (same(k.table, left.table) && same(k.refTable, right.table)) return pair(left, right);
-    if (same(k.table, right.table) && same(k.refTable, left.table)) return pair(right, left);
+    if (same(k.table, left.table) && same(k.refTable, right.table)) out.push(pair(left, right));
+    else if (same(k.table, right.table) && same(k.refTable, left.table)) out.push(pair(right, left));
   }
-  return undefined;
+  return out;
+}
+
+/** 두 테이블을 잇는 첫 JOIN 조건(가상 외래키로) */
+export function joinCondition(v: VirtualObjects, left: { table: string; alias: string }, right: { table: string; alias: string }): string | undefined {
+  return joinConditions(v, left, right)[0];
 }
 
 /** 가상 컬럼을 더한 SELECT 목록(테이블 데이터 열기) */
