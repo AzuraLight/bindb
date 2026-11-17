@@ -15,6 +15,12 @@
   primary key) and H2 (information_schema, or `CROSS_REFERENCES` with JDBC metadata / H2 1.x).
   `JOIN … ON` completion now suggests them without virtual foreign keys, one suggestion per key when two
   tables are linked more than once (e.g. `created_by` and `updated_by`).
+- **Hover information** in bound SQL files: tables and views (columns with types, primary key, foreign
+  keys, tables that reference them), aliases, columns (type, primary key, foreign key, referenced by — every
+  owning table when an unqualified name is ambiguous) and schemas (table and view counts). Uses loaded
+  metadata only.
+- **Table, view and column comments are read** (introspection level 2 and up) for PostgreSQL (including
+  materialized views), MySQL and H2, and shown in hover as plain text. SQLite has no comments.
 
 ## 0.3.0 — 2026-11-09
 

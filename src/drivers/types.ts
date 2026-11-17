@@ -195,6 +195,8 @@ export interface ConnectOptions {
 export interface ColumnMeta {
   name: string;
   type?: string;
+  /** 열 주석(2단계부터) */
+  comment?: string;
 }
 
 export interface FetchResult {
@@ -247,6 +249,8 @@ export interface MetaTable {
   columns: ColumnMeta[];
   /** 기본키 열(순서대로). 없으면 빈 배열 · undefined */
   primaryKey?: string[];
+  /** 테이블 · 뷰 주석(2단계부터) */
+  comment?: string;
   /** 이 테이블에서 나가는 외래 키(2단계부터) */
   foreignKeys?: ForeignKeyMeta[];
   /** 뷰 정의(Load sources for) */

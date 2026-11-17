@@ -19,6 +19,22 @@ export const STANDARD_FOREIGN_KEYS: ForeignKeyQuery = `
       ON u.constraint_schema = r.unique_constraint_schema AND u.constraint_name = r.unique_constraint_name
      AND u.ordinal_position = k.position_in_unique_constraint`;
 
+/**
+ * 주석 행: [schema, table, column(테이블 주석이면 NULL), comment]. 첫 열 이름은 table_schema.
+ * 표준 information_schema에는 주석이 없어 드라이버마다 준다.
+ */
+export function attachComments(byKey: Map<string, MetaTable>, rows: unknown[][]): void {
+  for (const [schema, table, column, comment] of rows) {
+    const t = byKey.get(`${schema}\u0000${table}`);
+    if (!t || (t.level ?? 3) < 2 || comment == null || String(comment) === '') continue;
+    if (column == null) t.comment = String(comment);
+    else {
+      const c = t.columns.find((x) => x.name === String(column));
+      if (c) c.comment = String(comment);
+    }
+  }
+}
+
 /** 외래 키 행을 테이블에 붙인다(2단계 이상인 테이블만) */
 export function attachForeignKeys(byKey: Map<string, MetaTable>, rows: unknown[][]): void {
   const sorted = [...rows].sort((a, b) => Number(a[7]) - Number(b[7]));
@@ -52,6 +68,7 @@ export async function introspectInfoSchema(
   isSystem: (schema: string) => boolean = () => false,
   current?: string,
   foreignKeys: ForeignKeyQuery = STANDARD_FOREIGN_KEYS,
+  comments?: string,
 ): Promise<MetaTable[]> {
   const tables = await queryAll(
     session,
@@ -107,6 +124,15 @@ export async function introspectInfoSchema(
       }
     } catch {
       // information_schema에 제약 정보가 없는 서버
+    }
+  }
+
+  // 주석(hover에 보인다): 2단계부터. 못 읽으면 없이 둔다
+  if (comments && [...levels.values()].some((l) => l >= 2)) {
+    try {
+      attachComments(byKey, await queryAll(session, `SELECT * FROM (${comments}) cm WHERE ${schemaFilter}`));
+    } catch {
+      // 주석을 못 읽는 서버 · 권한
     }
   }
 

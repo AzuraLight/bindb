@@ -83,6 +83,38 @@ describe('PostgreSQL (real server)', { skip: !pgAt && 'set BINDB_TEST_PG=host:po
     }
   });
 
+  it('reads table, view and column comments (level 2 and up)', async () => {
+    await queryAll(s, 'DROP SCHEMA IF EXISTS bindb_cm CASCADE');
+    for (const q of [
+      'CREATE SCHEMA bindb_cm',
+      'CREATE TABLE bindb_cm.t (id int, "Mixed" text, nocomment int)',
+      "COMMENT ON TABLE bindb_cm.t IS 'the table'",
+      "COMMENT ON COLUMN bindb_cm.t.id IS 'key'",
+      'COMMENT ON COLUMN bindb_cm.t."Mixed" IS \'mixed case\'',
+      'CREATE VIEW bindb_cm.v AS SELECT id FROM bindb_cm.t',
+      "COMMENT ON VIEW bindb_cm.v IS 'the view'",
+      'CREATE MATERIALIZED VIEW bindb_cm.mv AS SELECT 1 AS x',
+      "COMMENT ON MATERIALIZED VIEW bindb_cm.mv IS 'the matview'",
+      "COMMENT ON COLUMN bindb_cm.mv.x IS 'mx'",
+      'ALTER TABLE bindb_cm.t DROP COLUMN nocomment',
+    ]) await queryAll(s, q);
+    try {
+      const base = { id: 't', name: 't', driver: 'postgres' } as ConnectionConfig;
+      const meta = (await postgresDriver.introspect(s, base)).filter((m) => m.schema === 'bindb_cm');
+      const t = meta.find((m) => m.name === 't')!;
+      assert.equal(t.comment, 'the table');
+      assert.deepEqual(t.columns.map((c) => `${c.name}:${c.comment ?? ''}`), ['id:key', 'Mixed:mixed case']);
+      assert.equal(meta.find((m) => m.name === 'v')?.comment, 'the view');
+      const mv = meta.find((m) => m.name === 'mv');
+      assert.deepEqual([mv?.comment, mv?.columns[0].comment], ['the matview', 'mx']);
+      const lvl1 = (await postgresDriver.introspect(s, { ...base, schemaLevels: { bindb_cm: 1 } })).find((m) => m.schema === 'bindb_cm' && m.name === 't')!;
+      assert.equal(lvl1.comment, undefined);
+      assert.equal(lvl1.columns[0].comment, undefined);
+    } finally {
+      await queryAll(s, 'DROP SCHEMA bindb_cm CASCADE');
+    }
+  });
+
   it('still runs COPY to a server file', async () => {
     assert.equal((await run(s, "COPY (SELECT 1) TO '/dev/null'")).affected, 1);
   });
@@ -298,6 +330,16 @@ describe('MySQL (real server)', { skip: !myAt && 'set BINDB_TEST_MYSQL=host:port
     const meta = await mysqlDriver.introspect(s, cfg);
     const fk = meta.find((t) => t.name === 'fk_child')?.foreignKeys?.map((k) => `${k.columns}->${k.refSchema}.${k.refTable}(${k.refColumns})`).sort();
     assert.deepEqual(fk, ['e->bindb_test.e1(id)', 'x,y->bindb_test.fk_pairs(b,a)']);
+  });
+
+  it('reads table and column comments, not the VIEW marker of views', async () => {
+    await queryAll(s, "CREATE TABLE cm_t (id int COMMENT 'key', x int) COMMENT = 'the table'");
+    await queryAll(s, 'CREATE VIEW cm_v AS SELECT id FROM cm_t');
+    const meta = await mysqlDriver.introspect(s, cfg);
+    const t = meta.find((m) => m.name === 'cm_t')!;
+    assert.equal(t.comment, 'the table');
+    assert.deepEqual(t.columns.map((c) => `${c.name}:${c.comment ?? ''}`), ['id:key', 'x:']);
+    assert.equal(meta.find((m) => m.name === 'cm_v')?.comment, undefined);
   });
 
   it('plain statements are unchanged', async () => {

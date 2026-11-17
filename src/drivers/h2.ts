@@ -1,7 +1,7 @@
 import { closeSync, existsSync, openSync, readSync } from 'node:fs';
 import * as path from 'node:path';
 import { resolvePath, resolveTarget } from './common';
-import { attachForeignKeys, introspectInfoSchema, STANDARD_FOREIGN_KEYS } from './infoSchema';
+import { attachComments, attachForeignKeys, introspectInfoSchema, STANDARD_FOREIGN_KEYS } from './infoSchema';
 import { openJdbc, stopAllBridges, type JdbcSession } from './jdbc/bridge';
 import type { ConnectionConfig, ConnectOptions, Driver, IsolationLevel, JdbcMetadata, MetaTable, QueryCursor, Session } from './types';
 import { queryAll } from './cursor';
@@ -148,6 +148,12 @@ export function parseEnv(text: string): Record<string, string> {
   return env;
 }
 
+/** COMMENT ON — H2 1.x · 2.x 모두 REMARKS 열 */
+const H2_COMMENTS = `
+  SELECT TABLE_SCHEMA AS table_schema, TABLE_NAME, CAST(NULL AS VARCHAR) AS COLUMN_NAME, REMARKS FROM INFORMATION_SCHEMA.TABLES
+  UNION ALL
+  SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, REMARKS FROM INFORMATION_SCHEMA.COLUMNS`;
+
 const isH2System = (s: string) => /^(information_schema|pg_catalog)$/i.test(s);
 
 /**
@@ -180,6 +186,7 @@ async function introspectJdbc(session: Session, cfg: ConnectionConfig): Promise<
     ).catch(() => queryAll(session, STANDARD_FOREIGN_KEYS).catch(() => [] as unknown[][]));
     attachForeignKeys(byKey, rows);
   }
+  if ([...levels.values()].some((l) => l >= 2)) attachComments(byKey, await queryAll(session, H2_COMMENTS).catch(() => [] as unknown[][]));
   if ([...byKey.values()].some((t) => t.kind === 'view' && loadsSources(cfg, t.level ?? 3, isH2System(t.schema)))) {
     const views = await queryAll(session, 'SELECT TABLE_SCHEMA, TABLE_NAME, VIEW_DEFINITION FROM INFORMATION_SCHEMA.VIEWS').catch(() => []);
     for (const [schema, name, def] of views) {
@@ -257,6 +264,8 @@ export const h2Driver: Driver = {
       cfg,
       (s) => /^(information_schema|pg_catalog)$/i.test(s),
       'PUBLIC',
+      undefined,
+      H2_COMMENTS,
     );
   },
 };

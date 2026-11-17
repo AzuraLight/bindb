@@ -199,6 +199,16 @@ describe('H2 through the JDBC bridge (real Java)', { skip: !(java && jar) && 'se
     await s.close();
   });
 
+  it('reads comments through information_schema and through JDBC metadata', async () => {
+    await create('cmdb', '', ['CREATE TABLE T (ID INT, X INT)', "COMMENT ON TABLE T IS 'the table'", "COMMENT ON COLUMN T.ID IS 'key'"]);
+    const s = await h2Driver.connect(file('cmdb'), opts);
+    for (const patch of [{}, { introspectJdbc: true }]) {
+      const t = (await h2Driver.introspect(s, file('cmdb', patch))).find((m) => m.name === 'T')!;
+      assert.deepEqual([t.comment, ...t.columns.map((c) => `${c.name}:${c.comment ?? ''}`)], ['the table', 'ID:key', 'X:'], JSON.stringify(patch));
+    }
+    await s.close();
+  });
+
   it('a killed Java process is reported as a lost connection', async () => {
     const s = await h2Driver.connect(file('javaapp'), opts);
     const lost: string[] = [];

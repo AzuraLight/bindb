@@ -194,6 +194,10 @@ export const mysqlDriver: Driver = {
       `SELECT table_schema, table_name, constraint_name, column_name,
               referenced_table_schema, referenced_table_name, referenced_column_name, ordinal_position
          FROM information_schema.key_column_usage WHERE referenced_table_name IS NOT NULL`,
+      // 뷰의 table_comment는 'VIEW'라는 글자라 테이블만
+      `SELECT table_schema, table_name, NULL AS column_name, table_comment FROM information_schema.tables WHERE table_type = 'BASE TABLE'
+       UNION ALL
+       SELECT table_schema, table_name, column_name, column_comment FROM information_schema.columns`,
     );
   },
 };

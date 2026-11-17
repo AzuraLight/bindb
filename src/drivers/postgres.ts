@@ -4,7 +4,7 @@ import { connect } from 'node:net';
 import { tokenize } from '../language/tokenizer';
 import { driverOptionValues, isSslUnsupported, resolveTarget, tlsOptions } from './common';
 import { BufferedCursor, emptyCursor, queryAll } from './cursor';
-import { introspectInfoSchema } from './infoSchema';
+import { attachComments, introspectInfoSchema } from './infoSchema';
 import { levelsBySchema, loadsSources, type IntrospectionLevel } from './introspection';
 import type { ConnectionConfig, ConnectOptions, Driver, MetaTable, QueryCursor, Session } from './types';
 
@@ -127,6 +127,15 @@ const PG_FOREIGN_KEYS = `
     JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.col
     JOIN pg_attribute ra ON ra.attrelid = con.confrelid AND ra.attnum = k.refcol
    WHERE con.contype = 'f'`;
+
+/** COMMENT ON TABLE · VIEW · COLUMN(objsubid 0 = 테이블 자체) */
+const PG_COMMENTS = `
+  SELECT n.nspname AS table_schema, c.relname AS table_name, a.attname AS column_name, d.description
+    FROM pg_description d
+    JOIN pg_class c ON c.oid = d.objoid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    LEFT JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = d.objsubid AND d.objsubid > 0
+   WHERE d.classoid = 'pg_catalog.pg_class'::regclass AND (d.objsubid = 0 OR a.attname IS NOT NULL)`;
 
 async function materializedViews(
   session: Session,
@@ -286,8 +295,14 @@ export const postgresDriver: Driver = {
       ? `table_schema NOT LIKE 'pg\\_temp%'`
       : `table_schema NOT IN ('pg_catalog', 'information_schema') AND table_schema NOT LIKE 'pg\\_toast%' AND table_schema NOT LIKE 'pg\\_temp%'`;
     const isSystem = (s: string) => /^(pg_catalog|information_schema|pg_toast.*)$/.test(s);
-    const tables = await introspectInfoSchema(session, filter, cfg, isSystem, 'public', PG_FOREIGN_KEYS);
+    const tables = await introspectInfoSchema(session, filter, cfg, isSystem, 'public', PG_FOREIGN_KEYS, PG_COMMENTS);
     const known = new Map(tables.map((t) => [t.schema, t.level ?? 3] as const));
-    return [...tables, ...(await materializedViews(session, filter, cfg, isSystem, known))];
+    const matviews = await materializedViews(session, filter, cfg, isSystem, known);
+    // 머티리얼라이즈드 뷰는 information_schema 밖이라 주석도 따로 붙인다
+    if (matviews.some((t) => (t.level ?? 3) >= 2)) {
+      const rows = await queryAll(session, `SELECT * FROM (${PG_COMMENTS}) cm WHERE ${filter}`).catch(() => [] as unknown[][]);
+      attachComments(new Map(matviews.map((t) => [`${t.schema}\u0000${t.name}`, t])), rows);
+    }
+    return [...tables, ...matviews];
   },
 };
