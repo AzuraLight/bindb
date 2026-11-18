@@ -1,12 +1,13 @@
 import * as vscode from 'vscode';
-import { systemCatalog } from './systemCatalog';
 import { emptyVirtual, joinConditions, realForeignKeys, tableKey } from '../core/virtual';
 import type { VirtualStore } from '../ui/virtualObjects';
 import type { ConnectionStore } from '../core/connections';
 import type { SessionManager } from '../core/sessions';
 import { drivers, type ConnectionConfig, type DriverId, type MetaTable } from '../drivers';
-import { boundConnection } from '../ui/binding';
+import { boundConnection, boundSchema } from '../ui/binding';
+import { withCatalog } from '../ui/metaScope';
 import { completionContext, RESERVED, type TableRef } from './context';
+import { findTable, same } from './meta';
 import { splitStatements, statementAt } from './splitter';
 
 const KEYWORDS = [
@@ -34,12 +35,7 @@ function quoteIdent(driver: DriverId, name: string): string {
   return q + name.split(q).join(q + q) + q;
 }
 
-const same = (a: string | undefined, b: string | undefined) => !!a && !!b && a.toLowerCase() === b.toLowerCase();
-
-function resolveRef(ref: TableRef, tables: MetaTable[], defaultSchema: string | undefined): MetaTable | undefined {
-  const candidates = tables.filter((t) => same(t.name, ref.name) && (!ref.schema || same(t.schema, ref.schema)));
-  return candidates.find((t) => same(t.schema, defaultSchema)) ?? candidates[0];
-}
+const resolveRef = (ref: TableRef, tables: MetaTable[], defaultSchema: string | undefined) => findTable(tables, ref.name, ref.schema, defaultSchema);
 
 export class SqlCompletionProvider implements vscode.CompletionItemProvider {
   constructor(
@@ -56,7 +52,8 @@ export class SqlCompletionProvider implements vscode.CompletionItemProvider {
 
     const tables = cfg ? await this.tables(cfg) : [];
     const driver = cfg?.driver ?? 'postgres';
-    const defaultSchema = cfg ? drivers[cfg.driver].defaultSchema(cfg) : undefined;
+    // @schema 바인딩(Switch schema)이 있으면 그 스키마가 기본 — hover · 진단 · 이동과 같다
+    const defaultSchema = cfg ? (boundSchema(doc) ?? drivers[cfg.driver].defaultSchema(cfg)) : undefined;
     const items: vscode.CompletionItem[] = [];
 
     if (ctx.kind === 'table') {
@@ -152,7 +149,7 @@ export class SqlCompletionProvider implements vscode.CompletionItemProvider {
     const timeout = new Promise<MetaTable[]>((resolve) => setTimeout(() => resolve([]), 1500));
     const tables = await Promise.race([meta.catch(() => [] as MetaTable[]), timeout]);
     // Use pre-introspected objects for system catalogs that are not introspected(기본 켬)
-    return cfg.preIntrospected === false ? tables : [...tables, ...systemCatalog(cfg.driver, tables)];
+    return withCatalog(cfg, tables);
   }
 
   private tableItem(t: MetaTable, driver: DriverId, qualify: boolean): vscode.CompletionItem {

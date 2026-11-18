@@ -179,6 +179,9 @@ export function tokenize(text: string, dialect?: SqlDialect): Token[] {
   return tokens;
 }
 
+/** 단어 토큰이면 대문자로(키워드 비교용), 아니면 undefined */
+export const upperWord = (t: Token | undefined): string | undefined => (t?.type === 'word' ? t.text.toUpperCase() : undefined);
+
 /** 인용 식별자의 따옴표를 벗긴다 */
 export function identName(tok: Token): string {
   if (tok.type !== 'quoted') return tok.text;

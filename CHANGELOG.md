@@ -21,6 +21,22 @@
   metadata only.
 - **Table, view and column comments are read** (introspection level 2 and up) for PostgreSQL (including
   materialized views), MySQL and H2, and shown in hover as plain text. SQLite has no comments.
+- **Go to Declaration** for aliases, `WITH` names, and tables, views and columns created earlier in the
+  same file. **Find All References** for aliases and `WITH` names (within the statement) and for tables
+  and columns (in the file and in other `.sql` files of the workspace bound to the same connection).
+- **Reveal in BindB Explorer** (editor context menu): selects the table or column at the cursor in the
+  explorer.
+
+### Changed
+
+- Aliases are resolved per subquery: the same alias inside and outside a subquery no longer merges, and a
+  correlated subquery still sees the outer alias.
+- Completion uses the `-- @schema` binding as its default schema, like hover, warnings and navigation.
+- Completion and hover read table references the same way as warnings and navigation: `FOR UPDATE`,
+  `ON DUPLICATE KEY UPDATE`, `SELECT … INTO`, `EXTRACT(… FROM …)` and `IS DISTINCT FROM` are no longer
+  taken as tables, and tables listed after a table function or subquery (`FROM f(…) x, t`) are read.
+- Find All References honours `files.exclude` (entries set to `true`, per workspace folder) and skips
+  `node_modules` while searching, so excluded files do not count toward the 500-file limit.
 
 ## 0.3.0 — 2026-11-09
 

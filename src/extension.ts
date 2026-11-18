@@ -7,6 +7,7 @@ import { splitStatements, statementAt } from './language/splitter';
 import { ConnectionPanel, type Applied } from './ui/connectionPanel';
 import { UnresolvedDiagnostics } from './ui/diagnostics';
 import { SqlHoverProvider } from './ui/hover';
+import { revealInExplorer, SqlNavigation } from './ui/navigation';
 import { BindingStatus, boundConnection, boundSchema, pickConnection, setBinding, setSchemaBinding } from './ui/binding';
 import { RunCodeLensProvider } from './ui/codelens';
 import { errorText, ExplorerProvider, type Node } from './ui/explorer';
@@ -32,6 +33,8 @@ export interface BindbTestApi {
   ai: AiIntegration;
   results: ResultPanel;
   history: HistoryStore;
+  /** BindB 탐색기 뷰(탐색기에서 보여 주기를 테스트에서 확인한다) */
+  explorerView: vscode.TreeView<Node>;
   panelTrace: () => string[];
 }
 
@@ -43,6 +46,8 @@ export function activate(context: vscode.ExtensionContext): BindbTestApi {
   const results = new ResultPanel(context.extensionUri, sessions, history);
   const virtual = new VirtualStore(vscode.Uri.joinPath(context.globalStorageUri, 'virtual').fsPath);
   const explorer = new ExplorerProvider(store, sessions, context.extensionUri, virtual);
+  const explorerView = vscode.window.createTreeView('bindb.explorer', { treeDataProvider: explorer });
+  const navigation = new SqlNavigation(store, sessions);
   const ddl = new DdlMapping(store, sessions);
   ConnectionPanel.driverDir = vscode.Uri.joinPath(context.globalStorageUri, 'drivers').fsPath;
   const ai = new AiIntegration(context, store, sessions);
@@ -142,11 +147,14 @@ export function activate(context: vscode.ExtensionContext): BindbTestApi {
     results,
     explorer,
     new BindingStatus(store),
-    vscode.window.registerTreeDataProvider('bindb.explorer', explorer),
+    explorerView,
     vscode.languages.registerCodeLensProvider(SQL, new RunCodeLensProvider(store)),
     vscode.languages.registerCompletionItemProvider(SQL, new SqlCompletionProvider(store, sessions, virtual), '.', ' '),
     new UnresolvedDiagnostics(store, sessions),
     vscode.languages.registerHoverProvider(SQL, new SqlHoverProvider(store, sessions)),
+    vscode.languages.registerDefinitionProvider(SQL, navigation),
+    vscode.languages.registerReferenceProvider(SQL, navigation),
+    vscode.commands.registerCommand('bindb.revealInExplorer', () => revealInExplorer(navigation, explorerView)),
 
     vscode.commands.registerCommand('bindb.addConnection', () => showPanel({ pickDriver: true })),
     vscode.commands.registerCommand('bindb.manageConnections', () => showPanel({})),
@@ -302,7 +310,7 @@ export function activate(context: vscode.ExtensionContext): BindbTestApi {
       await results.openTable(cfg, table, { database: node.database }, list);
     }),
   );
-  return { store, sessions, ddl, ai, results, history, panelTrace: () => [...ConnectionPanel.trace] };
+  return { store, sessions, ddl, ai, results, history, explorerView, panelTrace: () => [...ConnectionPanel.trace] };
 }
 
 export function deactivate(): void {

@@ -48,6 +48,9 @@ describe('unresolved tables', () => {
     assert.deepEqual(problems('SELECT * FROM (SELECT 1) AS s JOIN (SELECT 2) t ON true'), []);
     assert.deepEqual(problems('SELECT 1 FROM dual', 'mysql', 'public'), []);
     assert.deepEqual(problems('SELECT * FROM pg_stat_statements'), []);
+    // 테이블 함수 · 서브쿼리 · LATERAL 뒤의 쉼표 목록도 이어서 읽는다
+    assert.deepEqual(problems('SELECT * FROM generate_series(1, 3) g, nope'), ['nope']);
+    assert.deepEqual(problems('SELECT * FROM (SELECT 1 FROM nope1) s, LATERAL (SELECT 2) l, nope2'), ['nope1', 'nope2']);
   });
 
   it('ignores FROM/UPDATE/INTO that are not table positions', () => {

@@ -77,6 +77,78 @@ describe('BindB in VS Code', function () {
     assert.ok(fs.statSync(dbFile).size > 0, 'written to the SQLite file');
   });
 
+  it('SQL editor: go to declaration, find usages, hover, unresolved warnings and reveal in explorer', async () => {
+    const content = '-- @conn: shop\nSELECT o.total FROM orders o;\nSELECT * FROM orders;\nSELECT * FROM nope';
+    const doc = await vscode.workspace.openTextDocument({ language: 'sql', content });
+    const editor = await vscode.window.showTextDocument(doc);
+    const pos = (needle, from = 0) => doc.positionAt(content.indexOf(needle, from));
+
+    const defs = await vscode.commands.executeCommand('vscode.executeDefinitionProvider', doc.uri, pos('o.total'));
+    assert.deepEqual(defs.map((d) => doc.offsetAt(d.range.start)), [content.indexOf('orders o') + 'orders '.length]);
+
+    const refs = await vscode.commands.executeCommand('vscode.executeReferenceProvider', doc.uri, pos('orders'));
+    assert.equal(refs.length, 2);
+
+    const hovers = await vscode.commands.executeCommand('vscode.executeHoverProvider', doc.uri, pos('total'));
+    assert.match(hovers.map((h) => h.contents.map((c) => c.value ?? c).join('')).join(''), /column.*orders\.total/);
+
+    const warnings = await until(() => vscode.languages.getDiagnostics(doc.uri).filter((d) => d.source === 'BindB').length && vscode.languages.getDiagnostics(doc.uri));
+    assert.deepEqual(warnings.map((d) => d.message), ["Unable to resolve table 'nope'"]);
+
+    // 탐색기에서 보여 주기: 테이블 · 열 노드가 실제로 선택되어야 한다
+    editor.selection = new vscode.Selection(pos('orders'), pos('orders'));
+    assert.equal(await vscode.commands.executeCommand('bindb.revealInExplorer'), true);
+    assert.deepEqual(api.explorerView.selection.map((n) => `${n.kind}:${n.table?.name}`), ['table:orders']);
+    await vscode.window.showTextDocument(doc);
+    editor.selection = new vscode.Selection(pos('total'), pos('total'));
+    assert.equal(await vscode.commands.executeCommand('bindb.revealInExplorer'), true);
+    assert.deepEqual(api.explorerView.selection.map((n) => `${n.kind}:${n.table?.name}.${n.column?.name}`), ['column:orders.total']);
+    // DB 객체가 아닌 자리는 false(안내만)
+    await vscode.window.showTextDocument(doc);
+    editor.selection = new vscode.Selection(pos('nope'), pos('nope'));
+    assert.equal(await vscode.commands.executeCommand('bindb.revealInExplorer'), false);
+  });
+
+  it('Find All References searches bound .sql files but skips node_modules and files.exclude', async () => {
+    const root = vscode.workspace.workspaceFolders[0].uri.fsPath;
+    const made = ['refs/a.sql', 'refs/other.sql', 'node_modules/pkg/b.sql', 'build/c.sql'].map((f) => path.join(root, f));
+    const settings = path.join(root, '.vscode', 'settings.json');
+    const hadSettings = fs.existsSync(settings);
+    for (const f of made) {
+      fs.mkdirSync(path.dirname(f), { recursive: true });
+      // other.sql은 다른 연결에 바인딩 — 제외
+      fs.writeFileSync(f, `-- @conn: ${f.endsWith('other.sql') ? 'someone else' : 'shop'}\nSELECT * FROM orders;\n`);
+    }
+    try {
+      await vscode.workspace.getConfiguration('files').update('exclude', { '**/build': true, '**/when': { when: '$(basename).x' } }, vscode.ConfigurationTarget.Workspace);
+      const content = '-- @conn: shop\nSELECT * FROM orders';
+      const doc = await vscode.workspace.openTextDocument({ language: 'sql', content });
+      const refs = await vscode.commands.executeCommand('vscode.executeReferenceProvider', doc.uri, doc.positionAt(content.indexOf('orders')));
+      const where = refs.map((r) => (r.uri.toString() === doc.uri.toString() ? 'this' : path.relative(root, r.uri.fsPath))).sort();
+      assert.deepEqual(where, [path.join('refs', 'a.sql'), 'this']);
+    } finally {
+      await vscode.workspace.getConfiguration('files').update('exclude', undefined, vscode.ConfigurationTarget.Workspace);
+      if (!hadSettings) fs.rmSync(settings, { force: true });
+      for (const d of ['refs', 'node_modules', 'build']) fs.rmSync(path.join(root, d), { recursive: true, force: true });
+    }
+  });
+
+  it('completion follows the -- @schema binding like hover and navigation', async () => {
+    const folder = path.join(dir, 'schemas');
+    fs.mkdirSync(folder, { recursive: true });
+    fs.writeFileSync(path.join(folder, 'a.sql'), 'CREATE TABLE public.items (id integer);\nCREATE TABLE sales.items (region text);\n');
+    const cfg = await api.store.add({ name: 'two schemas', driver: 'postgres', kind: 'ddl', ddlFolder: folder });
+    await api.sessions.metadata(cfg);
+    const columnsAt = async (header) => {
+      const content = `${header}SELECT i. FROM items i`;
+      const doc = await vscode.workspace.openTextDocument({ language: 'sql', content });
+      const list = await vscode.commands.executeCommand('vscode.executeCompletionItemProvider', doc.uri, doc.positionAt(content.indexOf('i.') + 2));
+      return list.items.map((i) => (typeof i.label === 'string' ? i.label : i.label.label)).sort();
+    };
+    assert.deepEqual(await columnsAt('-- @conn: two schemas\n'), ['id']);
+    assert.deepEqual(await columnsAt('-- @conn: two schemas\n-- @schema: sales\n'), ['region']);
+  });
+
   it('DDL mapping: Dump to writes files, Apply to opens a migration script', async () => {
     const ddl = await api.store.add({ name: 'shop (DDL)', driver: 'sqlite', kind: 'ddl', ddlFolder: ddlDir });
     const src = api.store.findByName('shop');

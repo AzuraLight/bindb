@@ -6,12 +6,30 @@ import type { ConnectionConfig } from '../drivers';
 const BINDING = /^\s*--\s*@conn:\s*(.+?)\s*$/;
 const SCAN_LINES = 5;
 
-function bindingLine(doc: vscode.TextDocument): { line: number; name: string } | undefined {
-  for (let i = 0; i < Math.min(SCAN_LINES, doc.lineCount); i++) {
-    const m = BINDING.exec(doc.lineAt(i).text);
+/** 맨 위 몇 줄에서 re에 맞는 주석 줄(줄 번호 · 값) */
+function scanHeader(lines: readonly string[], re: RegExp): { line: number; name: string } | undefined {
+  for (let i = 0; i < Math.min(SCAN_LINES, lines.length); i++) {
+    const m = re.exec(lines[i]);
     if (m) return { line: i, name: m[1] };
   }
   return undefined;
+}
+
+const headerLines = (doc: vscode.TextDocument) => Array.from({ length: Math.min(SCAN_LINES, doc.lineCount) }, (_, i) => doc.lineAt(i).text);
+const textLines = (text: string) => text.split(/\r?\n/, SCAN_LINES);
+
+function bindingLine(doc: vscode.TextDocument): { line: number; name: string } | undefined {
+  return scanHeader(headerLines(doc), BINDING);
+}
+
+/** 파일 텍스트(열지 않은 파일)의 연결 이름 */
+export function bindingNameOfText(text: string): string | undefined {
+  return scanHeader(textLines(text), BINDING)?.name;
+}
+
+/** 파일 텍스트의 @schema 바인딩 */
+export function schemaOfText(text: string): string | undefined {
+  return scanHeader(textLines(text), SCHEMA)?.name;
 }
 
 export function boundConnection(doc: vscode.TextDocument, store: ConnectionStore): ConnectionConfig | undefined {
@@ -23,11 +41,7 @@ export function boundConnection(doc: vscode.TextDocument, store: ConnectionStore
 const SCHEMA = /^\s*--\s*@schema:\s*(.+?)\s*$/;
 
 function schemaLine(doc: vscode.TextDocument): { line: number; name: string } | undefined {
-  for (let i = 0; i < Math.min(SCAN_LINES, doc.lineCount); i++) {
-    const m = SCHEMA.exec(doc.lineAt(i).text);
-    if (m) return { line: i, name: m[1] };
-  }
-  return undefined;
+  return scanHeader(headerLines(doc), SCHEMA);
 }
 
 export function boundSchema(doc: vscode.TextDocument): string | undefined {

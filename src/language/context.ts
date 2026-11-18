@@ -1,5 +1,8 @@
 import type { Statement } from './splitter';
-import { identName, isIdent, type Token } from './tokenizer';
+import { RESERVED, tableReferences } from './references';
+import { identName, isIdent, upperWord, type Token } from './tokenizer';
+
+export { RESERVED };
 
 export interface TableRef {
   schema?: string;
@@ -22,55 +25,21 @@ const COLUMN_CLAUSES = new Set([
   'DISTINCT', 'RETURNING', 'IN', 'BETWEEN', 'LIKE', 'IS', 'VALUES',
 ]);
 
-/** 별칭으로 읽으면 안 되는 단어 */
-export const RESERVED = new Set([
-  'SELECT', 'FROM', 'WHERE', 'JOIN', 'LEFT', 'RIGHT', 'INNER', 'OUTER', 'FULL', 'CROSS', 'NATURAL', 'ON',
-  'USING', 'GROUP', 'ORDER', 'BY', 'HAVING', 'LIMIT', 'OFFSET', 'FETCH', 'UNION', 'INTERSECT', 'EXCEPT',
-  'SET', 'VALUES', 'RETURNING', 'WINDOW', 'FOR', 'AS', 'AND', 'OR', 'NOT', 'LATERAL', 'WITH', 'INTO',
-  'UPDATE', 'DELETE', 'INSERT', 'DEFAULT', 'STRAIGHT_JOIN', 'WHEN', 'THEN', 'ELSE', 'END',
-]);
+const upper = upperWord;
 
-const upper = (t: Token | undefined) => (t?.type === 'word' ? t.text.toUpperCase() : undefined);
-
-/** FROM/JOIN 뒤의 `schema.table [AS] alias` 들 */
+/**
+ * FROM · JOIN · UPDATE · INSERT INTO · DELETE … USING 뒤의 `schema.table [AS] alias` 들.
+ * 판독은 진단 · 정의로 이동과 같은 references.tableReferences를 쓴다.
+ * 세 조각 이상(db.schema.table)이면 마지막 두 조각을 스키마 · 이름으로 본다.
+ */
 export function collectTableRefs(tokens: Token[]): TableRef[] {
   const code = tokens.filter((t) => t.type !== 'comment');
-  const refs: TableRef[] = [];
-
-  /** k 위치에서 참조 하나를 읽고 다음 위치를 돌려준다 */
-  const readRef = (k: number): number => {
-    if (!isIdent(code[k]) || RESERVED.has(upper(code[k]) ?? '')) return k;
-    let schema: string | undefined;
-    let name = identName(code[k]);
-    k++;
-    if (code[k]?.text === '.' && isIdent(code[k + 1])) {
-      schema = name;
-      name = identName(code[k + 1]);
-      k += 2;
-    }
-    // INSERT INTO t (a, b) 의 컬럼 목록은 별칭이 아니다.
-    if (upper(code[k]) === 'AS') k++;
-    let alias: string | undefined;
-    if (isIdent(code[k]) && !RESERVED.has(upper(code[k]) ?? '')) {
-      alias = identName(code[k]);
-      k++;
-    }
-    refs.push({ schema, name, alias });
-    return k;
-  };
-
-  for (let k = 0; k < code.length; k++) {
-    const w = upper(code[k]);
-    if (!w || !TABLE_CLAUSES.has(w) || w === 'TABLE') continue;
-    let j = readRef(k + 1);
-    // FROM a, b c, d
-    while (w === 'FROM' && code[j]?.text === ',' && j > k + 1) {
-      const next = readRef(j + 1);
-      if (next === j + 1) break;
-      j = next;
-    }
-  }
-  return refs;
+  const first = code[0]?.text === '(' ? upper(code.find((t) => t.text !== '(')) : upper(code[0]);
+  return tableReferences(code, first ?? '').map((r) => {
+    const name = identName(r.parts[r.parts.length - 1]);
+    const schema = r.parts.length > 1 ? identName(r.parts[r.parts.length - 2]) : undefined;
+    return { schema, name, alias: r.alias && identName(r.alias) };
+  });
 }
 
 /**

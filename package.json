@@ -269,6 +269,11 @@
         "icon": "$(trash)"
       },
       {
+        "command": "bindb.revealInExplorer",
+        "title": "Reveal in BindB Explorer",
+        "category": "BindB"
+      },
+      {
         "command": "bindb.refresh",
         "title": "Refresh Schema",
         "category": "BindB",
@@ -565,6 +570,13 @@
           "command": "bindb.introspectionLevel",
           "when": "view == bindb.explorer && (viewItem =~ /^connection/ || viewItem == schema)",
           "group": "2_introspect@1"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "bindb.revealInExplorer",
+          "when": "editorLangId == sql",
+          "group": "navigation@9"
         }
       ],
       "editor/title": [

@@ -13,7 +13,7 @@ export type Node =
   | { kind: 'database'; cfg: ConnectionConfig; database: string }
   | { kind: 'schema'; cfg: ConnectionConfig; schema: string; tables: MetaTable[]; database?: string }
   | { kind: 'table'; cfg: ConnectionConfig; table: MetaTable; database?: string }
-  | { kind: 'column'; cfg: ConnectionConfig; table: MetaTable; column: MetaTable['columns'][number] }
+  | { kind: 'column'; cfg: ConnectionConfig; table: MetaTable; column: MetaTable['columns'][number]; database?: string }
   | { kind: 'message'; text: string; error?: boolean }
   /** 가상 객체(Virtual objects and attributes). virtualKind · index는 지우기 명령이 쓴다 */
   | { kind: 'virtual'; cfg: ConnectionConfig; virtualKind: 'view'; index: number; view: VirtualView }
@@ -99,6 +99,7 @@ export class ExplorerProvider implements vscode.TreeDataProvider<Node>, vscode.D
       }
       case 'column': {
         const item = new vscode.TreeItem(node.column.name, vscode.TreeItemCollapsibleState.None);
+        item.id = `column:${node.cfg.id}:${node.database ?? ''}:${node.table.schema}.${node.table.name}.${node.column.name}`;
         item.description = node.column.type?.toLowerCase();
         item.iconPath = new vscode.ThemeIcon('symbol-field');
         item.contextValue = 'column';
@@ -167,7 +168,7 @@ export class ExplorerProvider implements vscode.TreeDataProvider<Node>, vscode.D
           const key = tableKey(node.table.schema, node.table.name);
           const same = (a: string) => a.toLowerCase() === key.toLowerCase();
           return [
-            ...node.table.columns.map((column): Node => ({ kind: 'column', cfg: node.cfg, table: node.table, column })),
+            ...node.table.columns.map((column): Node => ({ kind: 'column', cfg: node.cfg, table: node.table, column, database: node.database })),
             ...v.columns.flatMap((column, index): Node[] => (same(column.table) ? [{ kind: 'virtual', cfg: node.cfg, virtualKind: 'column', index, column }] : [])),
             ...v.foreignKeys.flatMap((fk, index): Node[] =>
               same(fk.table) || same(fk.refTable) ? [{ kind: 'virtual', cfg: node.cfg, virtualKind: 'fk', index, fk, table: key }] : [],
@@ -180,6 +181,39 @@ export class ExplorerProvider implements vscode.TreeDataProvider<Node>, vscode.D
     } catch (e) {
       return [{ kind: 'message', text: errorText(e), error: true }];
     }
+  }
+
+  /** 탐색기에서 노드를 찾아 보여 주기(TreeView.reveal)에 필요하다. getChildren과 같은 모양으로 부모를 만든다 */
+  async getParent(node: Node): Promise<Node | undefined> {
+    switch (node.kind) {
+      case 'connection':
+      case 'message':
+        return undefined;
+      case 'database':
+        return { kind: 'connection', cfg: node.cfg };
+      case 'schema':
+        return this.containerOf(node.cfg, node.database);
+      case 'column':
+        return { kind: 'table', cfg: node.cfg, table: node.table, database: node.database };
+      case 'table': {
+        const tables = await this.sessions.metadata(node.cfg, false, node.database);
+        const siblings = await this.schemasOf(node.cfg, tables, node.database);
+        const schema = siblings.find((n) => n.kind === 'schema' && n.schema === node.table.schema);
+        return schema ?? this.containerOf(node.cfg, node.database);
+      }
+      case 'virtual':
+        return undefined;
+    }
+  }
+
+  /** 스키마(또는 스키마를 건너뛴 테이블)들이 놓이는 노드: 데이터베이스 노드가 있으면 그것, 없으면 연결 */
+  private async containerOf(cfg: ConnectionConfig, database?: string): Promise<Node> {
+    if (database) return { kind: 'database', cfg, database };
+    if (cfg.kind !== 'ddl' && cfg.driver === 'postgres' && !cfg.singleDatabase && cfg.connectionType !== 'url' && cfg.database) {
+      const dbs = await this.sessions.databases(cfg).catch(() => [] as string[]);
+      if (dbs.length > 1) return { kind: 'database', cfg, database: cfg.database };
+    }
+    return { kind: 'connection', cfg };
   }
 
   /** Schemas 탭의 Schema pattern · Object filter를 적용해 스키마 노드로 묶는다 */

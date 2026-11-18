@@ -1,7 +1,8 @@
 import type { DriverId, MetaTable } from '../drivers/types';
-import { RESERVED } from './context';
+import { createdName, cteDeclarations, tableReferences } from './references';
 import type { Statement } from './splitter';
-import { identName, isIdent, type Token } from './tokenizer';
+import { findTable, same } from './meta';
+import { identName, isIdent, upperWord, type Token } from './tokenizer';
 
 /*
  * 해석되지 않는 참조 찾기 — DataGrip의 "Unresolved reference" 검사(SqlResolve)에 해당한다.
@@ -31,19 +32,10 @@ export interface ResolveScope {
 }
 
 const ANALYZED = new Set(['SELECT', 'WITH', 'INSERT', 'REPLACE', 'UPDATE', 'DELETE']);
-/** 이 단어 뒤의 `(`는 함수 호출이 아니라 묶음 · 서브쿼리 */
-const GROUP_BEFORE = new Set([
-  ...RESERVED, 'IN', 'EXISTS', 'ANY', 'ALL', 'SOME', 'IS', 'LIKE', 'BETWEEN', 'CASE', 'ARRAY', 'ROW', 'RECURSIVE',
-]);
-/** 테이블 이름 앞에 올 수 있는 수식어 */
-const TABLE_MODIFIERS = new Set(['ONLY', 'LOW_PRIORITY', 'IGNORE', 'QUICK', 'DELAYED', 'HIGH_PRIORITY']);
-/** 별칭 자리에 오지만 별칭이 아닌 단어 */
-const NOT_ALIAS = new Set([...RESERVED, 'TABLESAMPLE', 'PARTITION', 'FORCE', 'USE', 'IGNORE', 'NATURAL', 'START', 'CONNECT', 'QUALIFY']);
 /** 메타데이터에 없지만 늘 있는 테이블 */
 const BUILTIN_TABLES = new Set(['dual']);
 
-const upper = (t: Token | undefined) => (t?.type === 'word' ? t.text.toUpperCase() : undefined);
-const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+const upper = upperWord;
 
 interface Ref {
   schema?: string;
@@ -60,23 +52,11 @@ interface Ref {
 export function localObjects(statements: readonly Statement[]): Set<string> {
   const out = new Set<string>();
   for (const s of statements) {
-    const code = s.tokens.filter((t) => t.type !== 'comment');
-    if (upper(code[0]) !== 'CREATE') continue;
-    let k = 1;
-    while (k < code.length && !['TABLE', 'VIEW'].includes(upper(code[k]) ?? '')) {
-      if (k > 6) break;
-      k++;
-    }
-    if (!['TABLE', 'VIEW'].includes(upper(code[k]) ?? '')) continue;
-    k++;
-    while (['IF', 'NOT', 'EXISTS'].includes(upper(code[k]) ?? '')) k++;
-    if (!isIdent(code[k])) continue;
-    let name = identName(code[k]);
-    if (code[k + 1]?.text === '.' && isIdent(code[k + 2])) {
-      const schema = name;
-      name = identName(code[k + 2]);
-      out.add(`${schema.toLowerCase()}.${name.toLowerCase()}`);
-    }
+    const c = createdName(s.tokens.filter((t) => t.type !== 'comment'));
+    if (!c) continue;
+    // [schema.]name — 세 조각 이상이면 앞의 두 조각을 쓴다(예전 동작 그대로)
+    const name = identName(c.parts[Math.min(1, c.parts.length - 1)]);
+    if (c.parts.length > 1) out.add(`${identName(c.parts[0]).toLowerCase()}.${name.toLowerCase()}`);
     out.add(name.toLowerCase());
   }
   return out;
@@ -87,70 +67,20 @@ export function unresolvedReferences(statement: Statement, scope: ResolveScope):
   const first = code[0]?.text === '(' ? upper(code.find((t) => t.text !== '(')) : upper(code[0]);
   if (!first || !ANALYZED.has(first)) return [];
 
-  const ctes = cteNames(code);
+  const ctes = new Set(cteDeclarations(code).map((t) => identName(t).toLowerCase()));
   const refs: Ref[] = [];
   const refTokens = new Set<Token>();
-  /** 함수 호출 괄호 깊이(EXTRACT(x FROM y) · SUBSTRING(… FROM …) 안의 FROM은 테이블 자리가 아니다) */
-  const frames: ('call' | 'group')[] = [];
-
-  const readRef = (k: number, columnList = false): number => {
-    while (TABLE_MODIFIERS.has(upper(code[k]) ?? '')) k++;
-    if (!isIdent(code[k]) || RESERVED.has(upper(code[k]) ?? '')) return k;
-    const parts = [code[k]];
-    let j = k + 1;
-    while (code[j]?.text === '.' && isIdent(code[j + 1])) {
-      parts.push(code[j + 1]);
-      j += 2;
-    }
-    // generate_series(…) · unnest(…) 같은 테이블 함수
-    if (code[j]?.text === '(' && !columnList) return j;
-    if (upper(code[j]) === 'AS') j++;
-    let alias: string | undefined;
-    if (isIdent(code[j]) && !NOT_ALIAS.has(upper(code[j]) ?? '')) {
-      alias = identName(code[j]);
-      j++;
-    }
+  for (const src of tableReferences(code, first)) {
+    const parts = src.parts;
     for (const p of parts) refTokens.add(p);
     const nameTok = parts[parts.length - 1];
-    const ref: Ref = { name: identName(nameTok), alias, nameTok };
+    const ref: Ref = { name: identName(nameTok), alias: src.alias && identName(src.alias), nameTok };
     if (parts.length === 2) ref.schema = identName(parts[0]);
     // db.schema.table — 다른 카탈로그는 판정하지 않는다
     if (parts.length > 2) ref.unknown = true;
     // 닫히지 않은 "… 는 아직 입력 중
     if (parts.some((p) => p.open)) ref.unknown = true;
     refs.push(ref);
-    return j;
-  };
-
-  for (let k = 0; k < code.length; k++) {
-    const t = code[k];
-    if (t.text === '(') {
-      const prev = code[k - 1];
-      frames.push(isIdent(prev) && !GROUP_BEFORE.has(upper(prev) ?? '') ? 'call' : 'group');
-      continue;
-    }
-    if (t.text === ')') {
-      frames.pop();
-      continue;
-    }
-    if (frames.includes('call')) continue;
-    const w = upper(t);
-    if (!w) continue;
-    const prev = upper(code[k - 1]);
-    let tableHere = false;
-    if (w === 'FROM') tableHere = prev !== 'DISTINCT'; // IS DISTINCT FROM
-    else if (w === 'JOIN') tableHere = true;
-    else if (w === 'UPDATE') tableHere = k === 0 || code[k - 1]?.text === ')'; // FOR UPDATE · ON DUPLICATE KEY UPDATE · DO UPDATE 제외
-    else if (w === 'INTO') tableHere = prev === 'INSERT' || prev === 'REPLACE' || prev === 'IGNORE' || prev === 'DELAYED' || prev === 'LOW_PRIORITY' || prev === 'HIGH_PRIORITY';
-    else if (w === 'USING') tableHere = first === 'DELETE' && code[k + 1]?.text !== '(';
-    if (!tableHere) continue;
-    let j = readRef(k + 1, w === 'INTO');
-    while ((w === 'FROM' || w === 'USING') && code[j]?.text === ',') {
-      const next = readRef(j + 1);
-      if (next === j + 1) break;
-      j = next;
-    }
-    k = j - 1;
   }
 
   const problems: Problem[] = [];
@@ -169,8 +99,7 @@ export function unresolvedReferences(statement: Statement, scope: ResolveScope):
       ref.unknown = true;
       continue;
     }
-    const candidates = known.filter((t) => same(t.name, ref.name) && (!ref.schema || same(t.schema, ref.schema)));
-    const table = candidates.find((t) => scope.schema && same(t.schema, scope.schema)) ?? candidates[0];
+    const table = findTable(known, ref.name, ref.schema, scope.schema);
     if (table) {
       ref.table = table;
       continue;
@@ -242,28 +171,4 @@ export function unresolvedReferences(statement: Statement, scope: ResolveScope):
   }
 
   return problems.sort((a, b) => a.start - b.start);
-}
-
-/** WITH [RECURSIVE] a [(…)] AS [NOT] [MATERIALIZED] ( … ), b AS ( … ) 의 이름들 */
-function cteNames(code: Token[]): Set<string> {
-  const out = new Set<string>();
-  for (let k = 0; k < code.length; k++) {
-    const prev = upper(code[k - 1]);
-    if (!(prev === 'WITH' || prev === 'RECURSIVE' || code[k - 1]?.text === ',') || !isIdent(code[k])) continue;
-    let j = k + 1;
-    if (code[j]?.text === '(') {
-      let depth = 0;
-      for (; j < code.length; j++) {
-        if (code[j].text === '(') depth++;
-        else if (code[j].text === ')' && --depth === 0) break;
-      }
-      j++;
-    }
-    if (upper(code[j]) !== 'AS') continue;
-    // SELECT a, b AS c 와 구분: CTE는 AS 뒤에 ( 가 온다
-    j++;
-    while (['NOT', 'MATERIALIZED'].includes(upper(code[j]) ?? '')) j++;
-    if (code[j]?.text === '(') out.add(identName(code[k]).toLowerCase());
-  }
-  return out;
 }

@@ -1,11 +1,10 @@
 import * as vscode from 'vscode';
 import type { ConnectionStore } from '../core/connections';
 import type { SessionManager } from '../core/sessions';
-import { drivers } from '../drivers';
 import { localObjects, unresolvedReferences } from '../language/diagnostics';
 import { splitStatements } from '../language/splitter';
-import { systemCatalog } from '../language/systemCatalog';
 import { boundConnection, boundSchema } from './binding';
+import { cachedScope } from './metaScope';
 
 /**
  * 연결에 바인딩된 SQL 파일에 해석되지 않는 테이블 · 열을 경고로 표시한다.
@@ -54,18 +53,16 @@ export class UnresolvedDiagnostics implements vscode.Disposable {
     const version = doc.version;
     const cfg = boundConnection(doc, this.store);
     const enabled = vscode.workspace.getConfiguration('bindb').get<boolean>('diagnostics.unresolvedReferences', true);
-    const meta = cfg && enabled ? this.sessions.cachedMetadata(cfg.id) : undefined;
-    const tables = meta ? await meta.catch(() => undefined) : undefined;
+    const found = cfg && enabled ? await cachedScope(this.sessions, cfg, boundSchema(doc)) : undefined;
     if (doc.isClosed || doc.version !== version) return;
-    if (!cfg || !tables) {
+    if (!cfg || !found) {
       this.collection.delete(doc.uri);
       return;
     }
     const statements = splitStatements(doc.getText(), cfg.driver);
     const scope = {
       driver: cfg.driver,
-      tables: cfg.preIntrospected === false ? tables : [...tables, ...systemCatalog(cfg.driver, tables)],
-      schema: boundSchema(doc) ?? drivers[cfg.driver].defaultSchema(cfg),
+      ...found,
       local: localObjects(statements),
     };
     const out: vscode.Diagnostic[] = [];

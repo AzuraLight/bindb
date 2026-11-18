@@ -1,5 +1,6 @@
 import type { MetaTable } from '../drivers/types';
 import { collectTableRefs, type TableRef } from './context';
+import { findTable as findTableIn, same } from './meta';
 import type { Statement } from './splitter';
 import { identName, isIdent, type Token } from './tokenizer';
 
@@ -23,16 +24,12 @@ export interface HoverScope {
 const MAX_COLUMNS = 30;
 const MAX_REFERENCED_BY = 10;
 
-const same = (a: string | undefined, b: string | undefined) => !!a && !!b && a.toLowerCase() === b.toLowerCase();
 /** 마크다운 코드 조각 안에서 깨지지 않게 */
 const code = (s: string) => '`' + s.replace(/`/g, "'") + '`';
 /** 주석은 사용자 글이라 마크다운 · HTML로 해석되지 않게 이스케이프한다 */
 const plain = (s: string) => s.replace(/[\\`*_{}[\]()#+\-.!|<>~]/g, '\\$&').replace(/\r?\n/g, ' ');
 
-function findTable(scope: HoverScope, name: string, schema?: string): MetaTable | undefined {
-  const candidates = scope.tables.filter((t) => same(t.name, name) && (!schema || same(t.schema, schema)));
-  return candidates.find((t) => same(t.schema, scope.schema)) ?? candidates[0];
-}
+const findTable = (scope: HoverScope, name: string, schema?: string) => findTableIn(scope.tables, name, schema, scope.schema);
 
 const resolveRef = (scope: HoverScope, r: TableRef) => findTable(scope, r.name, r.schema);
 

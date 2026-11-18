@@ -96,6 +96,20 @@ describe('collectTableRefs', () => {
   it('does not treat keywords as aliases', () => {
     assert.deepEqual(collectTableRefs(tokenize('select * from users where id = 1')), [{ schema: undefined, name: 'users', alias: undefined }]);
   });
+
+  // 진단 · 정의로 이동과 같은 판독(references.tableReferences)을 쓴다 — 예전에는 아래를 테이블로 읽었다
+  it('ignores FROM/UPDATE/INTO that are not table positions', () => {
+    const names = (sql: string) => collectTableRefs(tokenize(sql)).map((r) => `${r.schema ?? ''}.${r.name}${r.alias ? ` ${r.alias}` : ''}`);
+    assert.deepEqual(names('select extract(year from created) from users'), ['.users']);
+    assert.deepEqual(names('select * from users for update skip locked'), ['.users']);
+    assert.deepEqual(names('insert into users (id) values (1) on duplicate key update name = 1'), ['.users']);
+    assert.deepEqual(names('select id into v from users'), ['.users']);
+    assert.deepEqual(names('select * from users where a is distinct from b'), ['.users']);
+    assert.deepEqual(names('select * from generate_series(1, 3) g, users u'), ['.users u']);
+    assert.deepEqual(names('select * from users tablesample system (10)'), ['.users']);
+    assert.deepEqual(names('delete from only users using orders o'), ['.users', '.orders o']);
+    assert.deepEqual(names('select * from db.public.users x'), ['public.users x']);
+  });
 });
 
 describe('completionContext', () => {
