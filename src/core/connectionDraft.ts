@@ -49,6 +49,7 @@ export interface AdvancedForm {
   startupScript: string;
 
   autoSync: boolean;
+  warnOutdatedDdl: boolean;
   loadSources: 'all' | 'nonSystem' | 'none';
   introspectOn: boolean;
   introspectInterval: string;
@@ -130,6 +131,7 @@ export function emptyAdvanced(): AdvancedForm {
     sessionControl: 'single',
     startupScript: '',
     autoSync: true,
+    warnOutdatedDdl: true,
     loadSources: 'nonSystem',
     introspectOn: false,
     introspectInterval: '10',
@@ -200,6 +202,7 @@ function advancedFromConfig(cfg: ConnectionConfig): AdvancedForm {
     sessionControl: cfg.sessionControl ?? 'single',
     startupScript: cfg.startupScript ?? '',
     autoSync: cfg.autoSync ?? true,
+    warnOutdatedDdl: cfg.warnOutdatedDdl ?? true,
     loadSources: cfg.loadSources ?? 'nonSystem',
     introspectOn: cfg.introspectInterval !== undefined,
     introspectInterval: str(cfg.introspectInterval, a.introspectInterval),
@@ -527,6 +530,7 @@ function buildAdvanced(form: ConnectionForm, config: Omit<ConnectionConfig, 'id'
   if (a.startupScript.trim()) config.startupScript = a.startupScript;
 
   if (!a.autoSync) config.autoSync = false;
+  if (!a.warnOutdatedDdl) config.warnOutdatedDdl = false;
   if (a.loadSources !== 'nonSystem') config.loadSources = a.loadSources;
   if (a.introspectOn) {
     const n = int(a.introspectInterval, 1, 1440);

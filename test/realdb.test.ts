@@ -7,6 +7,7 @@ import type { ConnectionConfig, Session } from '../src/drivers/types';
 import { splitStatements } from '../src/language/splitter';
 import { isolationSql, switchSchemaSql } from '../src/core/sessionSql';
 import { sqlLiteral } from '../src/shared/exportFormats';
+import { definitionFromRow, sameDefinition, viewDdlText, viewDefinitionQuery, viewMigration } from '../src/core/viewSource';
 
 /*
  * 실제 서버가 있어야 하는 테스트. 환경 변수로 서버를 주면 돈다(없으면 건너뛴다).
@@ -21,6 +22,18 @@ const target = (v: string | undefined) => {
 };
 const pgAt = target(process.env.BINDB_TEST_PG);
 const myAt = target(process.env.BINDB_TEST_MYSQL);
+
+/** 매개변수가 있는 조회를 끝까지 읽는다 */
+async function runWith(s: Session, sql: string, params: unknown[]) {
+  const c = await s.execute(sql, params);
+  const rows: unknown[][] = [];
+  for (;;) {
+    const r = await c.fetch(500);
+    rows.push(...r.rows);
+    if (r.done) break;
+  }
+  return rows;
+}
 
 /** 커서를 끝까지 읽는다 */
 async function run(s: Session, sql: string) {
@@ -112,6 +125,47 @@ describe('PostgreSQL (real server)', { skip: !pgAt && 'set BINDB_TEST_PG=host:po
       assert.equal(lvl1.columns[0].comment, undefined);
     } finally {
       await queryAll(s, 'DROP SCHEMA bindb_cm CASCADE');
+    }
+  });
+
+  // 뷰 DDL 편집기: 캐시한 정의와 편집기가 새로 읽은 정의가 평소에 같아야 열 때마다 경고하지 않는다
+  it('view DDL: cached and freshly read definitions match; Submit replaces the view', async () => {
+    await queryAll(s, 'DROP SCHEMA IF EXISTS bindb_vs CASCADE');
+    for (const q of [
+      'CREATE SCHEMA bindb_vs',
+      'CREATE TABLE bindb_vs.t (id int, name text)',
+      'CREATE VIEW bindb_vs.v AS SELECT id FROM bindb_vs.t WHERE id > 0',
+      'CREATE MATERIALIZED VIEW bindb_vs.m AS SELECT id FROM bindb_vs.t',
+    ]) await queryAll(s, q);
+    try {
+      const meta = await postgresDriver.introspect(s, { ...cfgPg(), introspectionLevel: 3, loadSources: 'all' });
+      const fresh = async (name: string) => {
+        const q = viewDefinitionQuery('postgres', { schema: 'bindb_vs', name });
+        return definitionFromRow('postgres', (await runWith(s, q.sql, q.params))[0]);
+      };
+      for (const name of ['v', 'm']) {
+        const cached = meta.find((t) => t.schema === 'bindb_vs' && t.name === name)?.definition;
+        const now = await fresh(name);
+        assert.ok(cached && now && sameDefinition(cached, now.definition), name);
+        assert.equal(now?.materialized, name === 'm');
+      }
+      const v = { schema: 'bindb_vs', name: 'v' };
+      // 편집기에 여는 DDL을 그대로 Submit해도 같은 뷰가 된다
+      const opened = viewDdlText('postgres', v, (await fresh('v'))!.definition);
+      const same = viewMigration('postgres', opened, v);
+      assert.ok(!('error' in same));
+      for (const sql of same.statements) await queryAll(s, sql);
+      assert.ok(sameDefinition((await fresh('v'))!.definition, meta.find((t) => t.name === 'v' && t.schema === 'bindb_vs')!.definition!));
+      const m =viewMigration('postgres', 'CREATE VIEW bindb_vs.v AS SELECT id, name FROM bindb_vs.t WHERE id > 1', v);
+      assert.ok(!('error' in m));
+      for (const sql of m.statements) await queryAll(s, sql);
+      assert.match((await fresh('v'))!.definition, /name/);
+      // PostgreSQL의 CREATE OR REPLACE VIEW는 열을 뺄 수 없다 — 서버 오류가 그대로 보인다
+      const drop = viewMigration('postgres', 'CREATE VIEW bindb_vs.v AS SELECT id FROM bindb_vs.t', v);
+      assert.ok(!('error' in drop));
+      await assert.rejects(queryAll(s, drop.statements[0]), /cannot drop columns from view/);
+    } finally {
+      await queryAll(s, 'DROP SCHEMA bindb_vs CASCADE');
     }
   });
 
@@ -340,6 +394,26 @@ describe('MySQL (real server)', { skip: !myAt && 'set BINDB_TEST_MYSQL=host:port
     assert.equal(t.comment, 'the table');
     assert.deepEqual(t.columns.map((c) => `${c.name}:${c.comment ?? ''}`), ['id:key', 'x:']);
     assert.equal(meta.find((m) => m.name === 'cm_v')?.comment, undefined);
+  });
+
+  it('view DDL: cached and freshly read definitions match; Submit keeps SQL SECURITY and replaces the view', async () => {
+    await queryAll(s, 'CREATE TABLE vs_t (id int, name varchar(20))');
+    await queryAll(s, 'CREATE SQL SECURITY INVOKER VIEW vs_v AS SELECT id FROM vs_t WHERE id > 0');
+    const v = { schema: 'bindb_test', name: 'vs_v' };
+    const fresh = async () => {
+      const q = viewDefinitionQuery('mysql', v);
+      return definitionFromRow('mysql', (await runWith(s, q.sql, q.params))[0]);
+    };
+    const meta = await mysqlDriver.introspect(s, { ...cfg, introspectionLevel: 3, loadSources: 'all' });
+    const cached = meta.find((t) => t.name === 'vs_v')?.definition;
+    const now = await fresh();
+    assert.ok(cached && now && sameDefinition(cached, now.definition));
+    const m = viewMigration('mysql', 'CREATE SQL SECURITY INVOKER VIEW vs_v AS SELECT id, name FROM vs_t', v);
+    assert.ok(!('error' in m));
+    assert.deepEqual(m.statements, ['CREATE OR REPLACE SQL SECURITY INVOKER VIEW `bindb_test`.`vs_v` AS SELECT id, name FROM vs_t']);
+    for (const sql of m.statements) await queryAll(s, sql);
+    assert.match((await fresh())!.definition, /`name`/);
+    assert.deepEqual(await queryAll(s, "SELECT security_type FROM information_schema.views WHERE table_schema = 'bindb_test' AND table_name = 'vs_v'"), [['INVOKER']]);
   });
 
   it('plain statements are unchanged', async () => {

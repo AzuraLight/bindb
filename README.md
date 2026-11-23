@@ -15,6 +15,7 @@ Schema-aware SQL editing and a fast result grid for **PostgreSQL**, **MySQL / Ma
 - **Data Sources panel** modelled on DataGrip's Data Sources and Drivers dialog — General / Options / SSH/SSL / Schemas / Advanced tabs, **Test Connection** with the server version, URL paste, global and project data sources, data source templates and session templates.
 - **SSH tunnels and SSL** — password, key pair or agent authentication, `~/.ssh/config` and `known_hosts`; SSL modes Prefer / Require / Verify CA / Verify full with CA and client certificates.
 - **Introspection levels** like DataGrip's — chosen automatically by schema size, or set per data source and per schema.
+- **View DDL editor** — right-click a view → **Go to DDL**, edit it and **Submit**; BindB warns when the database changed in the meantime.
 - **Result grid** — WHERE / ORDER BY bar, click-to-sort headers, export all rows to CSV / TSV / JSON / Markdown / SQL INSERT, Copy as, and editing table data with Preview / Submit / Revert.
 - **Transactions** — automatic or manual transaction control (Commit / Rollback), isolation level, and query cancel.
 - **Query History** — `Cmd/Ctrl+Alt+E` searches what you ran on each connection.
@@ -45,6 +46,7 @@ You need Java 11 or later (`JAVA_HOME` or `java` on `PATH`) and an `h2-*.jar` (D
 | `bindb.connections` | Connection definitions. Edited by **Add Connection**; passwords are not stored here. |
 | `bindb.h2.jarPath` | Path to the H2 driver `h2-*.jar`. |
 | `bindb.grid.pageSize` | Rows fetched per page in the result grid (default 500). |
+| `bindb.ddl.showPreviewOfValidScript` | Show the migration script before running it when a view DDL is submitted (default off). |
 | `bindb.diagnostics.unresolvedReferences` | Warn about tables and columns that are not in the loaded metadata (default on). |
 | `bindb.ssh.configurations` | SSH configurations shared by data sources (user settings only). |
 | `bindb.dataSourceTemplates` | Data source templates, without credentials. |
@@ -60,7 +62,7 @@ VS Code 1.103 or later (SQLite uses the `node:sqlite` module built into its Node
 - An embedded H2 file is locked while BindB has it open. To use it from your app at the same time, add `AUTO_SERVER=TRUE` to both.
 - H2 array columns cannot be edited in the grid.
 - SSH hosts that need `ProxyJump` or `ProxyCommand` are not supported yet; BindB refuses them with a message instead of connecting directly.
-- There is no editor for object DDL yet.
+- Only view DDL can be edited (Go to DDL). Materialized views, functions, procedures and triggers cannot.
 
 ## Privacy
 

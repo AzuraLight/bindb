@@ -410,6 +410,10 @@ export function OptionsTab(p: EditorProps) {
             <option value="none">None</option>
           </Select>
         </div>
+        <label className="check">
+          <input type="checkbox" checked={a.warnOutdatedDdl} onChange={(e) => setA('warnOutdatedDdl', e.target.checked)} />
+          Warn when editing outdated DDL
+        </label>
         <div className="opt-grid">
           <label htmlFor="o-level">Default level:</label>
           <Select id="o-level" className="mid" value={a.introspectionLevel} onChange={(e) => setA('introspectionLevel', e.target.value as AdvancedForm['introspectionLevel'])}>

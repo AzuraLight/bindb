@@ -60,6 +60,8 @@ export interface ConnectionConfig {
 
   /** Options · Introspection */
   autoSync?: boolean;
+  /** Warn when editing outdated DDL: 뷰 DDL을 열 때 캐시한 정의가 DB와 다르면 알린다. 없으면 켬 */
+  warnOutdatedDdl?: boolean;
   loadSources?: 'all' | 'nonSystem' | 'none';
   /** 분. 없으면 끔 */
   introspectInterval?: number;

@@ -436,6 +436,32 @@ export class SessionManager implements vscode.Disposable {
     return meta;
   }
 
+  /**
+   * 구조 정보 읽기 세션에서 매개변수가 있는 조회를 끝까지 읽는다(뷰 DDL 편집기가 DB의 지금 정의를 읽을 때).
+   * 쓰는 문장은 받지 않는다.
+   */
+  async introspectionQuery(cfg: ConnectionConfig, sql: string, params: readonly unknown[], database?: string): Promise<unknown[][]> {
+    if (cfg.kind === 'ddl') throw new Error(`${cfg.name} is a DDL data source; it cannot run queries.`);
+    const c = classifySql(sql, cfg.driver);
+    if (c.kind !== 'read') throw new Error(`Only read-only queries can run here (${c.reason ?? c.kind}).`);
+    const target = database && database !== cfg.database ? { ...cfg, database } : cfg;
+    const entry = this.open(target, this.channel(cfg, 'introspect', {}, database));
+    return this.runOn(entry, async (session) => {
+      const cursor = await session.execute(sql, params);
+      const rows: unknown[][] = [];
+      try {
+        for (;;) {
+          const r = await cursor.fetch(1000);
+          rows.push(...r.rows);
+          if (r.done) break;
+        }
+      } finally {
+        await cursor.close();
+      }
+      return rows;
+    });
+  }
+
   /** 이미 받아 둔 메타데이터만(자동완성용, 기다리지 않는다) */
   cachedMetadata(id: string): Promise<MetaTable[]> | undefined {
     return this.meta.get(id);

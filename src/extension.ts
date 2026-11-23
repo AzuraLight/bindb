@@ -22,6 +22,7 @@ import { selectList, tableKey } from './core/virtual';
 import { registerVirtualCommands, VirtualStore } from './ui/virtualObjects';
 import { DdlMapping } from './ui/ddlMapping';
 import { ResultPanel } from './ui/resultPanel';
+import { ViewSourceEditor } from './ui/viewSource';
 
 const SQL = { language: 'sql' };
 
@@ -49,6 +50,7 @@ export function activate(context: vscode.ExtensionContext): BindbTestApi {
   const explorerView = vscode.window.createTreeView('bindb.explorer', { treeDataProvider: explorer });
   const navigation = new SqlNavigation(store, sessions);
   const ddl = new DdlMapping(store, sessions);
+  const viewSource = new ViewSourceEditor(store, sessions);
   ConnectionPanel.driverDir = vscode.Uri.joinPath(context.globalStorageUri, 'drivers').fsPath;
   const ai = new AiIntegration(context, store, sessions);
 
@@ -275,6 +277,16 @@ export function activate(context: vscode.ExtensionContext): BindbTestApi {
     vscode.commands.registerCommand('bindb.ddl.dump', (node?: Node) => node && 'cfg' in node && ddl.dump(node.cfg).catch((e) => vscode.window.showErrorMessage(errorText(e)))),
     vscode.commands.registerCommand('bindb.ddl.update', (node?: Node) => node && 'cfg' in node && ddl.update(node.cfg).catch((e) => vscode.window.showErrorMessage(errorText(e)))),
     vscode.commands.registerCommand('bindb.ddl.apply', (node?: Node) => node && 'cfg' in node && ddl.apply(node.cfg).catch((e) => vscode.window.showErrorMessage(errorText(e)))),
+    viewSource,
+    vscode.commands.registerCommand('bindb.ddl.goToDdl', async (node?: Node) => {
+      if (node?.kind !== 'table') return;
+      try {
+        await viewSource.open(node.cfg, node.table, node.database);
+      } catch (e) {
+        vscode.window.showErrorMessage(errorText(e));
+      }
+    }),
+    vscode.commands.registerCommand('bindb.ddl.submit', (uri?: vscode.Uri) => viewSource.submit(uri)),
     vscode.commands.registerCommand('bindb.commit', () => endTransaction('COMMIT')),
     vscode.commands.registerCommand('bindb.rollback', () => endTransaction('ROLLBACK')),
     vscode.commands.registerCommand('bindb.switchSchema', async () => {

@@ -87,7 +87,8 @@ export class ExplorerProvider implements vscode.TreeDataProvider<Node>, vscode.D
         const item = new vscode.TreeItem(node.table.name, vscode.TreeItemCollapsibleState.Collapsed);
         item.id = `table:${node.cfg.id}:${node.database ?? ''}:${node.table.schema}.${node.table.name}`;
         item.iconPath = new vscode.ThemeIcon(node.table.kind === 'view' ? 'eye' : 'table');
-        item.contextValue = 'table';
+        // 실제 DB의 뷰는 Go to DDL(뷰 DDL 편집기)을 쓸 수 있다. 메뉴 조건은 /^table/로 둘 다 받는다
+        item.contextValue = node.table.kind === 'view' && node.cfg.kind !== 'ddl' ? 'table view' : 'table';
         item.command = { command: 'bindb.previewTable', title: 'Open Table Data', arguments: [node] };
         if (node.table.definition) {
           // Load sources for: 뷰 정의를 툴팁으로

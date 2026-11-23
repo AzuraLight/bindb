@@ -31,6 +31,20 @@
   and columns (in the file and in other `.sql` files of the workspace bound to the same connection).
 - **Reveal in BindB Explorer** (editor context menu): selects the table or column at the cursor in the
   explorer.
+- **View DDL editor**, like DataGrip's Go to DDL: right-click a view → **Go to DDL**, change the
+  `CREATE VIEW` statement and click **Submit** in the editor title. Saving keeps the change without sending
+  it. PostgreSQL, MySQL and H2 run `CREATE OR REPLACE VIEW` (attributes such as `SQL SECURITY` are kept as
+  written); SQLite runs `DROP VIEW` and `CREATE VIEW` in one transaction. The name is always qualified with
+  the view's schema; renaming, several statements and materialized views are refused. Read-only data sources
+  refuse it, and with manual transaction control the change stays in the open transaction.
+  - **Warn when editing outdated DDL** (Options → Introspection, on by default): when a view opens, the
+    cached definition is compared with the database and a notification offers **Synchronize** or
+    **Disable check**.
+  - On **Submit** the definition is read again; if it changed after editing started, choose
+    **Force Refactoring** or **Abort Refactoring and Synchronize** (then **Revert local changes**,
+    **Keep local changes** or **Merge**, which opens a diff).
+  - `bindb.ddl.showPreviewOfValidScript` (off by default, as in DataGrip) shows the script before it runs.
+  - PostgreSQL cannot drop or rename view columns with `CREATE OR REPLACE VIEW`; the server's error is shown.
 
 ### Changed
 

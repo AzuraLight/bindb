@@ -7,6 +7,7 @@ import { after, describe, it } from 'node:test';
 import { queryAll } from '../src/drivers/cursor';
 import { sqliteDriver } from '../src/drivers/sqlite';
 import type { ConnectionConfig } from '../src/drivers/types';
+import { definitionFromRow, viewDdlText, viewDefinitionQuery, viewMigration } from '../src/core/viewSource';
 
 const dir = mkdtempSync(path.join(tmpdir(), 'bindb-sqlite-'));
 after(() => rmSync(dir, { recursive: true, force: true }));
@@ -18,6 +19,37 @@ async function exec(file: string, sql: string) {
   await (await s.execute(sql)).close();
   await s.close();
 }
+
+describe('sqlite view DDL', () => {
+  it('reads the view body and replaces the view with DROP + CREATE in one transaction', async () => {
+    const file = path.join(dir, 'views.db');
+    await exec(file, 'CREATE TABLE t (id INTEGER, name TEXT)');
+    await exec(file, 'CREATE VIEW v AS SELECT id FROM t');
+    const s = await sqliteDriver.connect(cfg(file), {});
+    const v = { schema: 'main', name: 'v' };
+    const read = async () => {
+      const q = viewDefinitionQuery('sqlite', v);
+      const c = await s.execute(q.sql, q.params);
+      const { rows } = await c.fetch(10);
+      await c.close();
+      return definitionFromRow('sqlite', rows[0]);
+    };
+    assert.deepEqual(await read(), { definition: 'SELECT id FROM t', materialized: false });
+    const m = viewMigration('sqlite', viewDdlText('sqlite', v, 'SELECT id, name FROM t'), v);
+    assert.ok(!('error' in m));
+    for (const sql of ['BEGIN', ...m.statements, 'COMMIT']) await (await s.execute(sql)).close();
+    assert.deepEqual(await read(), { definition: 'SELECT id, name FROM t', materialized: false });
+    // CREATE가 실패하면 DROP도 되돌린다(뷰가 사라지지 않는다)
+    const bad = viewMigration('sqlite', 'CREATE VIEW v AS SELECT FROM WHERE', v);
+    assert.ok(!('error' in bad));
+    await (await s.execute('BEGIN')).close();
+    await (await s.execute(bad.statements[0])).close();
+    await assert.rejects(s.execute(bad.statements[1]));
+    await (await s.execute('ROLLBACK')).close();
+    assert.deepEqual(await read(), { definition: 'SELECT id, name FROM t', materialized: false });
+    await s.close();
+  });
+});
 
 describe('sqlite driver', () => {
   it('reads FTS5 tables (the reported "no such module: fts5" bug)', async () => {
