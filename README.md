@@ -13,7 +13,7 @@ Schema-aware SQL editing and a fast result grid for **PostgreSQL**, **MySQL / Ma
 - **Code insight in SQL files** — warnings for tables and columns that are not in the loaded metadata (`bindb.diagnostics.unresolvedReferences`), hover with columns, keys and comments, **Go to Declaration**, **Find All References** and **Reveal in BindB Explorer**. Only metadata that is already loaded is used.
 - **One connection per file** — a `-- @conn: <name>` comment at the top of a `.sql` file picks its connection, and `-- @schema: <name>` its schema. The status bar shows the connection; click to change.
 - **Data Sources panel** modelled on DataGrip's Data Sources and Drivers dialog — General / Options / SSH/SSL / Schemas / Advanced tabs, **Test Connection** with the server version, URL paste, global and project data sources, data source templates and session templates.
-- **SSH tunnels and SSL** — password, key pair or agent authentication, `~/.ssh/config` and `known_hosts`; SSL modes Prefer / Require / Verify CA / Verify full with CA and client certificates.
+- **SSH tunnels and SSL** — password, key pair or agent authentication, `~/.ssh/config` (including `ProxyJump` and `ProxyCommand`) and `known_hosts`; SSL modes Prefer / Require / Verify CA / Verify full with CA and client certificates.
 - **Introspection levels** like DataGrip's — chosen automatically by schema size, or set per data source and per schema.
 - **View DDL editor** — right-click a view → **Go to DDL**, edit it and **Submit**; BindB warns when the database changed in the meantime.
 - **Result grid** — WHERE / ORDER BY bar, click-to-sort headers, export all rows to CSV / TSV / JSON / Markdown / SQL INSERT, Copy as, and editing table data with Preview / Submit / Revert.
@@ -61,7 +61,7 @@ VS Code 1.103 or later (SQLite uses the `node:sqlite` module built into its Node
 
 - An embedded H2 file is locked while BindB has it open. To use it from your app at the same time, add `AUTO_SERVER=TRUE` to both.
 - H2 array columns cannot be edited in the grid.
-- SSH hosts that need `ProxyJump` or `ProxyCommand` are not supported yet; BindB refuses them with a message instead of connecting directly.
+- SSH jump hosts are read only from `~/.ssh/config` (`ProxyJump` / `ProxyCommand`, with **Parse config file** on); the panel has no jump host fields.
 - Only view DDL can be edited (Go to DDL). Materialized views, functions, procedures and triggers cannot.
 
 ## Privacy

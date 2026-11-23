@@ -50,8 +50,13 @@ export function arrayCursor(columns: ColumnMeta[], rows: unknown[][], affectedRo
   return new BufferedCursor(columns, rows, true, async () => [], async () => {}, affectedRows);
 }
 
-export async function queryAll(session: Session, sql: string): Promise<unknown[][]> {
-  const cursor = await session.execute(sql);
+/**
+ * 문장을 실행하고 커서를 끝까지 읽는다(끝나면 커서를 닫는다).
+ * @param params 매개변수(드라이버의 자리 표시 형식: postgres $1, 나머지 ?)
+ * @returns 모든 행
+ */
+export async function queryAll(session: Session, sql: string, params?: readonly unknown[]): Promise<unknown[][]> {
+  const cursor = await session.execute(sql, params);
   const out: unknown[][] = [];
   try {
     for (;;) {

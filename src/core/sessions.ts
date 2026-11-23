@@ -86,6 +86,12 @@ export class SessionManager implements vscode.Disposable {
     return `${cfg.id}#${db}shared`;
   }
 
+  /** 이 작업이 쓸 세션을 연다(연결의 기본이 아닌 데이터베이스면 그 데이터베이스로 접속한다) */
+  private openChannel(cfg: ConnectionConfig, purpose: 'query' | 'introspect', ctx: RunContext = {}, database?: string): Live {
+    const target = database && database !== cfg.database ? { ...cfg, database } : cfg;
+    return this.open(target, this.channel(cfg, purpose, ctx, database));
+  }
+
   private open(cfg: ConnectionConfig, key: string): Live {
     let entry = this.live.get(key);
     if (!entry) {
@@ -216,8 +222,7 @@ export class SessionManager implements vscode.Disposable {
       const c = classifySql(sql, cfg.driver);
       if (c.kind === 'write') throw new Error(`${cfg.name} is read-only: this statement was not run because ${c.reason ?? 'it may change data'}.`);
     }
-    const target = ctx.database && ctx.database !== cfg.database ? { ...cfg, database: ctx.database } : cfg;
-    const entry = this.open(target, this.channel(cfg, 'query', ctx, ctx.database));
+    const entry = this.openChannel(cfg, 'query', ctx, ctx.database);
     const cursor = await this.runOn(entry, async (session) => {
       await this.applySchema(cfg, entry, session, ctx.schema, false);
       // Transaction control · Manual: postgres · sqlite는 자동 커밋을 끌 수 없어 첫 문장 앞에 BEGIN을 보낸다
@@ -294,8 +299,7 @@ export class SessionManager implements vscode.Disposable {
   ): Promise<{ committed: boolean }> {
     // 세션 템플릿이 읽기 전용을 켜거나 끈 값을 본다
     if (withSessionTemplate(cfg).readOnly) throw new Error(`${cfg.name} is read-only.`);
-    const target = ctx.database && ctx.database !== cfg.database ? { ...cfg, database: ctx.database } : cfg;
-    const entry = this.open(target, this.channel(cfg, 'query', ctx, ctx.database));
+    const entry = this.openChannel(cfg, 'query', ctx, ctx.database);
     const manual = cfg.transactionControl === 'manual';
     return this.runOn(entry, async (session) => {
       const exec = async (sql: string, params?: unknown[]) => {
@@ -355,8 +359,7 @@ export class SessionManager implements vscode.Disposable {
   /** Switch schema. explicit = 사용자가 명령으로 바꿈(Manual에서도 적용) */
   async switchSchema(cfg: ConnectionConfig, schema: string, ctx: RunContext = {}): Promise<void> {
     if ((cfg.switchSchema ?? 'manual') === 'disable') throw new Error(`Schema switching is disabled for ${cfg.name}.`);
-    const target = ctx.database && ctx.database !== cfg.database ? { ...cfg, database: ctx.database } : cfg;
-    const entry = this.open(target, this.channel(cfg, 'query', ctx, ctx.database));
+    const entry = this.openChannel(cfg, 'query', ctx, ctx.database);
     await this.runOn(entry, (session) => this.applySchema(cfg, entry, session, schema, true));
   }
 
@@ -437,29 +440,19 @@ export class SessionManager implements vscode.Disposable {
   }
 
   /**
-   * 구조 정보 읽기 세션에서 매개변수가 있는 조회를 끝까지 읽는다(뷰 DDL 편집기가 DB의 지금 정의를 읽을 때).
-   * 쓰는 문장은 받지 않는다.
+   * 매개변수가 있는 조회를 끝까지 읽는다(뷰 DDL 편집기가 DB의 지금 정의를 읽을 때). 쓰는 문장은 받지 않는다.
+   * 구조 정보 읽기(introspection) 세션에서 실행한다.
+   * @param database 연결의 기본이 아닌 데이터베이스(없으면 기본)
+   * @returns 모든 행
    */
   async introspectionQuery(cfg: ConnectionConfig, sql: string, params: readonly unknown[], database?: string): Promise<unknown[][]> {
     if (cfg.kind === 'ddl') throw new Error(`${cfg.name} is a DDL data source; it cannot run queries.`);
     const c = classifySql(sql, cfg.driver);
-    if (c.kind !== 'read') throw new Error(`Only read-only queries can run here (${c.reason ?? c.kind}).`);
-    const target = database && database !== cfg.database ? { ...cfg, database } : cfg;
-    const entry = this.open(target, this.channel(cfg, 'introspect', {}, database));
-    return this.runOn(entry, async (session) => {
-      const cursor = await session.execute(sql, params);
-      const rows: unknown[][] = [];
-      try {
-        for (;;) {
-          const r = await cursor.fetch(1000);
-          rows.push(...r.rows);
-          if (r.done) break;
-        }
-      } finally {
-        await cursor.close();
-      }
-      return rows;
-    });
+    // MySQL SHOW CREATE VIEW `s`.`v`는 읽기지만 분류기는 CREATE 때문에 쓰기로 본다 — 이 모양 하나만 허용한다
+    const showCreateView = cfg.driver === 'mysql' && /^SHOW CREATE VIEW `(?:[^`]|``)+`\.`(?:[^`]|``)+`$/.test(sql);
+    if (c.kind !== 'read' && !showCreateView) throw new Error(`Only read-only queries can run here (${c.reason ?? c.kind}).`);
+    const entry = this.openChannel(cfg, 'introspect', {}, database);
+    return this.runOn(entry, (session) => queryAll(session, sql, params));
   }
 
   /** 이미 받아 둔 메타데이터만(자동완성용, 기다리지 않는다) */

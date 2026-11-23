@@ -2,7 +2,7 @@ import { createHash, createHmac } from 'node:crypto';
 
 /*
  * SSH 설정 파일과 known_hosts(OpenSSH 형식).
- *  - Parse config file ~/.ssh/config: Host 별칭 → HostName · User · Port · IdentityFile
+ *  - Parse config file ~/.ssh/config: Host 별칭 → HostName · User · Port · IdentityFile · ProxyJump · ProxyCommand
  *  - Strict host key checking: known_hosts에 있는 키와 맞는지(해시된 |1|salt|hash 항목 포함)
  */
 
@@ -14,7 +14,10 @@ export interface SshConfigEntry {
   identityFile?: string;
   /** IdentityFile 전부, 나온 순서대로(OpenSSH는 차례로 시도한다) */
   identityFiles: string[];
-  /** 아직 지원하지 않는다 — 있으면 바로 접속하지 않고 알린다 */
+  /**
+   * 점프 호스트([user@]host[:port], 쉼표로 여러 단계) · 프록시 명령(토큰은 바꾸지 않은 원문).
+   * 둘 중 먼저 나온 것만 쓴다(none도 자리를 차지한다 — ssh_config(5) ProxyJump)
+   */
   proxyJump?: string;
   proxyCommand?: string;
 }
@@ -41,15 +44,19 @@ export function resolveSshConfig(text: string, alias: string, homeOrOpts: string
   const out: SshConfigEntry = { identityFiles: [] };
   let applies = true; // 첫 Host 줄 앞은 모든 호스트에 해당한다
   let depth = 0;
+  /** ProxyJump · ProxyCommand 중 먼저 나온 것이 있다(뒤의 것은 무시한다) */
+  let proxyDecided = false;
   const visit = (content: string) => {
     if (++depth > 16) return; // Include 순환
     for (const raw of content.split('\n')) {
       const line = raw.replace(/#.*/, '').trim();
       if (!line) continue;
-      const m = /^(\S+)\s*(?:=\s*|\s+)(.+)$/.exec(line);
+      // 키에는 = 가 들어가지 않는다(Key=value에서 값에 공백이 있어도 키를 바르게 나눈다)
+      const m = /^([^\s=]+)\s*(?:=\s*|\s+)(.+)$/.exec(line);
       if (!m) continue;
       const key = m[1].toLowerCase();
-      const value = m[2].trim().replace(/^"(.*)"$/, '$1');
+      // ProxyCommand는 줄의 나머지를 그대로 셸에 넘긴다(따옴표도 셸이 해석한다)
+      const value = key === 'proxycommand' ? m[2].trim() : m[2].trim().replace(/^"(.*)"$/, '$1');
       if (key === 'host') {
         const pats = value.split(/\s+/);
         applies = pats.some((p) => !p.startsWith('!') && globMatch(p, alias)) && !pats.some((p) => p.startsWith('!') && globMatch(p.slice(1), alias));
@@ -61,15 +68,26 @@ export function resolveSshConfig(text: string, alias: string, homeOrOpts: string
       }
       if (!applies) continue;
       if (key === 'include') {
-        for (const pattern of value.split(/\s+/)) for (const file of o.include?.(pattern.replace(/^~(?=\/|$)/, home)) ?? []) visit(file);
+        // 포함한 파일 안의 Host 줄은 그 파일 안에서만 — 끝나면 이 블록의 상태로 돌아온다(ssh_config(5) Include)
+        const outer = applies;
+        for (const pattern of value.split(/\s+/)) {
+          for (const file of o.include?.(pattern.replace(/^~(?=\/|$)/, home)) ?? []) {
+            visit(file);
+            applies = outer;
+          }
+        }
         continue;
       }
       if (key === 'hostname' && out.hostName === undefined) out.hostName = value;
       else if (key === 'user' && out.user === undefined) out.user = value;
       else if (key === 'port' && out.port === undefined) out.port = Number(value) || undefined;
       else if (key === 'identityfile' && value.toLowerCase() !== 'none') out.identityFiles.push(value);
-      else if (key === 'proxyjump' && out.proxyJump === undefined && value.toLowerCase() !== 'none') out.proxyJump = value;
-      else if (key === 'proxycommand' && out.proxyCommand === undefined && value.toLowerCase() !== 'none') out.proxyCommand = value;
+      else if ((key === 'proxyjump' || key === 'proxycommand') && !proxyDecided) {
+        proxyDecided = true;
+        if (value.toLowerCase() === 'none') continue;
+        if (key === 'proxyjump') out.proxyJump = value;
+        else out.proxyCommand = value;
+      }
     }
     depth--;
   };
@@ -89,6 +107,41 @@ export function resolveSshConfig(text: string, alias: string, homeOrOpts: string
   out.identityFiles = out.identityFiles.map((f) => expand(f).replace(/^~(?=\/|$)/, home));
   if (out.identityFiles.length) out.identityFile = out.identityFiles[0];
   return out;
+}
+
+/** ProxyJump 항목 하나: [user@]host[:port] 또는 ssh://[user@]host[:port] (IPv6는 [addr]:port) */
+export function parseJumpHost(spec: string): { host: string; user?: string; port?: number } {
+  let s = spec.trim().replace(/^ssh:\/\//i, '');
+  let user: string | undefined;
+  const at = s.lastIndexOf('@');
+  if (at >= 0) {
+    user = s.slice(0, at) || undefined;
+    s = s.slice(at + 1);
+  }
+  let port: number | undefined;
+  const v6 = /^\[([^\]]+)\](?::(\d+))?$/.exec(s);
+  if (v6) return { host: v6[1], user, port: v6[2] ? Number(v6[2]) : undefined };
+  const m = /^([^:]+):(\d+)$/.exec(s);
+  if (m) {
+    s = m[1];
+    port = Number(m[2]);
+  }
+  return { host: s, user, port };
+}
+
+/** ProxyCommand의 토큰: %h(접속할 호스트) · %p(포트) · %r(원격 사용자) · %n(설정에 쓴 별칭) · %% (ssh_config(5) TOKENS) */
+export function expandProxyCommand(command: string, t: { host: string; port: number; user: string; alias: string }): string {
+  // 셸 명령에 그대로 들어가므로 셸 메타문자가 든 이름은 거부한다(OpenSSH 9.6 · CVE-2023-51385와 같은 방어).
+  // 명령에 실제로 들어가는 값만 검사한다
+  const names: Record<string, [string, string]> = { h: ['host', t.host], r: ['user', t.user], n: ['host alias', t.alias] };
+  const map: Record<string, string> = { h: t.host, p: String(t.port), r: t.user, n: t.alias, '%': '%' };
+  return command.replace(/%([hprn%])/g, (_, k: string) => {
+    const [what, value] = names[k] ?? [];
+    if (value !== undefined && (/[\s'"`$\\;&<>|(){}*?!#~]/.test(value) || value.startsWith('-'))) {
+      throw new Error(`SSH: the ${what} "${value}" contains characters that are not allowed in a ProxyCommand.`);
+    }
+    return map[k];
+  });
 }
 
 function globMatch(pattern: string, value: string): boolean {

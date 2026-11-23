@@ -736,7 +736,7 @@
         "command": "bindb.runStatement",
         "key": "ctrl+enter",
         "mac": "cmd+enter",
-        "when": "editorTextFocus && editorLangId == sql"
+        "when": "editorTextFocus && editorLangId == sql && resourceScheme != bindb-ddl"
       },
       {
         "command": "bindb.queryHistory",

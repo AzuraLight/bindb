@@ -22,7 +22,7 @@ import { selectList, tableKey } from './core/virtual';
 import { registerVirtualCommands, VirtualStore } from './ui/virtualObjects';
 import { DdlMapping } from './ui/ddlMapping';
 import { ResultPanel } from './ui/resultPanel';
-import { ViewSourceEditor } from './ui/viewSource';
+import { DDL_SCHEME, ViewSourceEditor } from './ui/viewSource';
 
 const SQL = { language: 'sql' };
 
@@ -82,6 +82,11 @@ export function activate(context: vscode.ExtensionContext): BindbTestApi {
     const editor = vscode.window.activeTextEditor;
     const doc = uri ? await vscode.workspace.openTextDocument(uri) : editor?.document;
     if (!doc) return;
+    // 뷰 DDL 편집기는 Submit으로만 보낸다(그대로 실행하면 OR REPLACE 없이 CREATE를 보내고, 연결 바인딩 줄도 끼워 넣는다)
+    if (doc.uri.scheme === DDL_SCHEME) {
+      vscode.window.showInformationMessage('View DDL is sent with Submit (editor title), not run as a statement.');
+      return;
+    }
 
     // 문장을 나누는 규칙(문자열 · 주석)은 DB마다 다르다 — 연결을 먼저 정한다
     const cfg = await connectionFor(doc);

@@ -14,7 +14,19 @@
   visible from that place has it — the subquery's own tables and the outer ones. Nothing is judged when a
   visible source has unknown columns (subquery, table function, `WITH` name, table not in the metadata).
   Aliases, output aliases (also without `AS`), keywords, niladic functions such as `CURRENT_DATE`, date parts,
-  hidden columns (`rowid`, `ctid`, `_ROWID_` …) and type names are not taken as columns.
+  hidden columns (`rowid`, `ctid`, `_ROWID_` …) and type names are not taken as columns, nor are SQLite
+  `INSERT OR REPLACE` / `INDEXED BY` / `$name` parameters, MySQL index hints, `PARTITION (…)`,
+  `IN BOOLEAN MODE` / `IN NATURAL LANGUAGE MODE`, `HIGH_PRIORITY`, `DISTINCTROW`, `CONVERT(x, type)` (also H2),
+  `CHARACTER SET` names, `GET_FORMAT(DATE, …)` and `JSON_TABLE` column definitions, PostgreSQL named arguments
+  (`days => 3`), `timestamp with time zone`, `IS JSON`, `IS NFC NORMALIZED`, `COLLATION FOR`, `U&'…'`,
+  `XMLELEMENT(NAME …)`, `EXTRACT(field FROM …)`, the type after `RETURNING` and the `ON EMPTY` / `ON ERROR`
+  words inside SQL/JSON functions, and H2 `SELECT TOP n`.
+  Column alias lists (`FROM t AS x(a, b)`, `WITH c(a, b)`, MySQL `VALUES … AS n (i, m)`) are names. A `WITH`
+  body cannot see the query the `WITH` belongs to, but sees the queries around it (a `WITH` inside a
+  subquery). Tables are read after `STRAIGHT_JOIN`, after index hints, `PARTITION (…)` and `INDEXED BY` in a
+  comma list, after SQLite `UPDATE OR …` / `INSERT OR … INTO`, in `[NOT] MATERIALIZED` bodies and in writable
+  CTEs (`WITH x AS (UPDATE t …)`). In PostgreSQL and H2 a quoted column name must match in case (`"Name"` is
+  not `name`); `U&"…"` names are not judged.
 - **Foreign keys are read from the database** (introspection level 2 and up) for PostgreSQL (`pg_catalog`,
   so tables you do not own are included), MySQL, SQLite (`REFERENCES t` without columns resolves to t's
   primary key) and H2 (information_schema, or `CROSS_REFERENCES` with JDBC metadata / H2 1.x).
@@ -33,18 +45,53 @@
   explorer.
 - **View DDL editor**, like DataGrip's Go to DDL: right-click a view → **Go to DDL**, change the
   `CREATE VIEW` statement and click **Submit** in the editor title. Saving keeps the change without sending
-  it. PostgreSQL, MySQL and H2 run `CREATE OR REPLACE VIEW` (attributes such as `SQL SECURITY` are kept as
-  written); SQLite runs `DROP VIEW` and `CREATE VIEW` in one transaction. The name is always qualified with
-  the view's schema; renaming, several statements and materialized views are refused. Read-only data sources
-  refuse it, and with manual transaction control the change stays in the open transaction.
+  it. PostgreSQL, MySQL and H2 run `CREATE OR REPLACE VIEW`; SQLite runs `DROP VIEW IF EXISTS` and
+  `CREATE VIEW` in one transaction and recreates the view's triggers (which `DROP VIEW` removes). The name is
+  always qualified with the view's schema and quoted whatever the code style (H2 folds unquoted names to
+  upper case; SQLite reserved words); renaming, several statements and materialized views are refused.
+  Read-only data sources refuse it. With manual transaction control the change stays in the open
+  transaction on PostgreSQL and SQLite; MySQL and H2 commit DDL at once, which also commits the open
+  transaction, and the message says so. Like DataGrip, the editor reads the view through the introspection
+  session, so it never closes a console's open result; when introspection has its own session, an
+  uncommitted change is not seen there until it is committed. Ctrl/Cmd+Enter does not run the DDL editor's
+  statement (use Submit). A cached definition that is a whole `CREATE` statement (H2 1.x) is opened as its
+  body.
+  - The opened DDL carries the view's attributes from the database, so Submit keeps them: PostgreSQL
+    `security_barrier`, `security_invoker` and `check_option`; MySQL `ALGORITHM`, `DEFINER`, `SQL SECURITY`,
+    the column list and `WITH … CHECK OPTION`; the SQLite column list. A plain `CREATE OR REPLACE VIEW`
+    would reset them (PostgreSQL clears the options; MySQL makes the current user the definer with
+    `SQL SECURITY DEFINER`).
   - **Warn when editing outdated DDL** (Options → Introspection, on by default): when a view opens, the
     cached definition is compared with the database and a notification offers **Synchronize** or
-    **Disable check**.
-  - On **Submit** the definition is read again; if it changed after editing started, choose
+    **Disable check**. Definitions are compared token by token, so a change inside a string literal counts.
+  - On **Submit** the definition and attributes are read again (in the code style the editor was opened with,
+    so changing the style is not a conflict); if they changed after editing started, choose
     **Force Refactoring** or **Abort Refactoring and Synchronize** (then **Revert local changes**,
-    **Keep local changes** or **Merge**, which opens a diff).
+    **Keep local changes** or **Merge**, which opens a diff). Unsaved edits are saved first.
   - `bindb.ddl.showPreviewOfValidScript` (off by default, as in DataGrip) shows the script before it runs.
   - PostgreSQL cannot drop or rename view columns with `CREATE OR REPLACE VIEW`; the server's error is shown.
+- **SSH jump hosts from `~/.ssh/config`** (with **Parse config file** on), as DataGrip's OpenSSH backend
+  does:
+  - `ProxyJump`, including several hops (`a,b`, `user@host:port`, `ssh://…`); each jump host uses its own
+    `HostName`, `User`, `Port`, `IdentityFile` and `ProxyJump` from the config. Host keys of jump hosts are
+    checked like the server's.
+  - `ProxyCommand` runs as `exec <command>` through the shell, like OpenSSH, and its standard input/output
+    carries SSH (`%h %p %r %n %%`); a host, user or alias name with shell metacharacters is refused when the
+    command uses it, as in OpenSSH 9.6. Its last error line is shown when the connection fails. Closing the
+    tunnel, or the command exiting, ends the command and its child processes (process group; process tree
+    on Windows).
+  - Whichever of `ProxyJump` / `ProxyCommand` comes first applies (`none` too), as in OpenSSH. After an
+    `Include`, the enclosing `Host` block applies again, and `Key=value with spaces` is read.
+  - Jump hosts authenticate like OpenSSH: their `IdentityFile` (or the default keys), then the agent, then
+    keyboard-interactive and password prompts; cancelling a prompt stops at once. An agent that cannot be
+    reached is skipped (its reason is added if every method fails). The data source's SSH password or key is
+    used only for the last server. Keys with a passphrase are skipped for jump hosts (load them into the
+    agent).
+  - Up to 8 jump hosts; a `ProxyJump` loop stops there.
+  - A handshake timeout no longer raises an uncaught error after the message (also for direct connections).
+  - The connection timeout no longer counts the time spent answering a password, keyboard-interactive or
+    host key prompt (also for direct connections). A connection that closes before authentication fails
+    with "connection closed before authentication finished" instead of waiting forever.
 
 ### Changed
 

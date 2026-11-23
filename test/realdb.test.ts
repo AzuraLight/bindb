@@ -3,11 +3,12 @@ import { after, before, describe, it } from 'node:test';
 import { queryAll } from '../src/drivers/cursor';
 import { mysqlDriver } from '../src/drivers/mysql';
 import { postgresDriver, usesCopyProtocol } from '../src/drivers/postgres';
-import type { ConnectionConfig, Session } from '../src/drivers/types';
+import type { CodeStyle, ConnectionConfig, DriverId, Session } from '../src/drivers/types';
 import { splitStatements } from '../src/language/splitter';
 import { isolationSql, switchSchemaSql } from '../src/core/sessionSql';
 import { sqlLiteral } from '../src/shared/exportFormats';
-import { definitionFromRow, sameDefinition, viewDdlText, viewDefinitionQuery, viewMigration } from '../src/core/viewSource';
+import { readViewSource, sameDefinition, sameSource, viewDdlText, viewMigration, type ViewName } from '../src/core/viewSource';
+import { withCodeStyle } from '../src/core/ddl';
 
 /*
  * 실제 서버가 있어야 하는 테스트. 환경 변수로 서버를 주면 돈다(없으면 건너뛴다).
@@ -23,18 +24,6 @@ const target = (v: string | undefined) => {
 const pgAt = target(process.env.BINDB_TEST_PG);
 const myAt = target(process.env.BINDB_TEST_MYSQL);
 
-/** 매개변수가 있는 조회를 끝까지 읽는다 */
-async function runWith(s: Session, sql: string, params: unknown[]) {
-  const c = await s.execute(sql, params);
-  const rows: unknown[][] = [];
-  for (;;) {
-    const r = await c.fetch(500);
-    rows.push(...r.rows);
-    if (r.done) break;
-  }
-  return rows;
-}
-
 /** 커서를 끝까지 읽는다 */
 async function run(s: Session, sql: string) {
   const c = await s.execute(sql);
@@ -46,6 +35,11 @@ async function run(s: Session, sql: string) {
   }
   return { cols: c.columns.map((x) => x.name), rows, affected: c.affectedRows };
 }
+
+/** 뷰 DDL 편집기와 같은 조회로 이 세션에서 뷰 정의를 읽는다 */
+const readView = (s: Session, driver: DriverId, v: ViewName, style?: CodeStyle) => readViewSource(driver, v, (q) => queryAll(s, q.sql, q.params), style);
+/** 소문자 키워드 · 필요할 때만 인용하는 코드 스타일 */
+const LOWER = { keywordCase: 'lower', quoteIdentifiers: 'needed' } as const;
 
 describe('COPY sub-protocol detection', () => {
   it('flags COPY … STDIN / STDOUT only', () => {
@@ -139,24 +133,21 @@ describe('PostgreSQL (real server)', { skip: !pgAt && 'set BINDB_TEST_PG=host:po
     ]) await queryAll(s, q);
     try {
       const meta = await postgresDriver.introspect(s, { ...cfgPg(), introspectionLevel: 3, loadSources: 'all' });
-      const fresh = async (name: string) => {
-        const q = viewDefinitionQuery('postgres', { schema: 'bindb_vs', name });
-        return definitionFromRow('postgres', (await runWith(s, q.sql, q.params))[0]);
-      };
+      const fresh = (name: string) => readView(s, 'postgres', { schema: 'bindb_vs', name });
       for (const name of ['v', 'm']) {
         const cached = meta.find((t) => t.schema === 'bindb_vs' && t.name === name)?.definition;
         const now = await fresh(name);
-        assert.ok(cached && now && sameDefinition(cached, now.definition), name);
+        assert.ok(cached && now && sameDefinition(cached, now.definition, 'postgres'), name);
         assert.equal(now?.materialized, name === 'm');
       }
       const v = { schema: 'bindb_vs', name: 'v' };
       // 편집기에 여는 DDL을 그대로 Submit해도 같은 뷰가 된다
-      const opened = viewDdlText('postgres', v, (await fresh('v'))!.definition);
+      const opened = viewDdlText((await fresh('v'))!);
       const same = viewMigration('postgres', opened, v);
       assert.ok(!('error' in same));
       for (const sql of same.statements) await queryAll(s, sql);
-      assert.ok(sameDefinition((await fresh('v'))!.definition, meta.find((t) => t.name === 'v' && t.schema === 'bindb_vs')!.definition!));
-      const m =viewMigration('postgres', 'CREATE VIEW bindb_vs.v AS SELECT id, name FROM bindb_vs.t WHERE id > 1', v);
+      assert.ok(sameDefinition((await fresh('v'))!.definition, meta.find((t) => t.name === 'v' && t.schema === 'bindb_vs')!.definition!, 'postgres'));
+      const m = viewMigration('postgres', 'CREATE VIEW bindb_vs.v AS SELECT id, name FROM bindb_vs.t WHERE id > 1', v);
       assert.ok(!('error' in m));
       for (const sql of m.statements) await queryAll(s, sql);
       assert.match((await fresh('v'))!.definition, /name/);
@@ -166,6 +157,79 @@ describe('PostgreSQL (real server)', { skip: !pgAt && 'set BINDB_TEST_PG=host:po
       await assert.rejects(queryAll(s, drop.statements[0]), /cannot drop columns from view/);
     } finally {
       await queryAll(s, 'DROP SCHEMA bindb_vs CASCADE');
+    }
+  });
+
+  // 코드 리뷰에서 찾은 것: 본문만 다시 만들어 보안 옵션 · CHECK OPTION이 사라졌다
+  it('view DDL: Submit of the opened DDL keeps security_barrier, security_invoker and check_option', async () => {
+    await queryAll(s, 'DROP SCHEMA IF EXISTS bindb_vo CASCADE');
+    for (const q of [
+      'CREATE SCHEMA bindb_vo',
+      'CREATE TABLE bindb_vo.t (id int, owner text)',
+      'CREATE VIEW bindb_vo.v WITH (security_barrier = true, security_invoker = true) AS SELECT id FROM bindb_vo.t WHERE id > 0 WITH LOCAL CHECK OPTION',
+    ]) await queryAll(s, q);
+    try {
+      const v = { schema: 'bindb_vo', name: 'v' };
+      const fresh = () => readView(s, 'postgres', v);
+      const before = (await fresh())!;
+      const m = viewMigration('postgres', viewDdlText(before).replace('id > 0', 'id > 1'), v);
+      assert.ok(!('error' in m));
+      for (const sql of m.statements) await queryAll(s, sql);
+      const [[options]] = await queryAll(s, "SELECT array_to_string(reloptions, ',') FROM pg_class WHERE oid = 'bindb_vo.v'::regclass");
+      assert.deepEqual(String(options).split(',').sort(), ['check_option=local', 'security_barrier=true', 'security_invoker=true']);
+      assert.match((await fresh())!.definition, /id > 1/);
+    } finally {
+      await queryAll(s, 'DROP SCHEMA bindb_vo CASCADE');
+    }
+  });
+
+  it('view DDL round trip: every reloption combination, quoted mixed-case / special names, comments and strings with semicolons', async () => {
+    const schema = 'Bindb "Mixed" S;';
+    const q = (s: string) => `"${s.split('"').join('""')}"`;
+    await queryAll(s, `DROP SCHEMA IF EXISTS ${q(schema)} CASCADE`);
+    await queryAll(s, `CREATE SCHEMA ${q(schema)}`);
+    await queryAll(s, `CREATE TABLE ${q(schema)}.t (id int, "Name" text)`);
+    const opts = ['security_barrier = true', 'security_invoker = true', 'check_option = local'];
+    const names = ['MixedCase', 'semi;colon view', 'a"b', 'select', 'ünï', 'v5', 'v6', 'v7'];
+    const reloptions = async (name: string) =>
+      String((await queryAll(s, `SELECT coalesce(array_to_string(c.reloptions, ','), '') FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relname = $2`, [schema, name]))[0][0])
+        .split(',')
+        .filter(Boolean)
+        .sort();
+    try {
+      for (let mask = 0; mask < 8; mask++) {
+        const name = names[mask];
+        const on = opts.filter((_, i) => mask & (1 << i));
+        const withOpts = on.filter((o) => !o.startsWith('check_option'));
+        const check = on.some((o) => o.startsWith('check_option')) ? ' WITH LOCAL CHECK OPTION' : '';
+        await queryAll(
+          s,
+          `CREATE VIEW ${q(schema)}.${q(name)}${withOpts.length ? ` WITH (${withOpts.join(', ')})` : ''} AS
+             SELECT id, "Name", 'a;b' AS s, $$x;y$$ AS d /* c; */ FROM ${q(schema)}.t -- trailing; comment
+             WHERE id > 0 AND "Name" <> 'it''s;'${check}`,
+        );
+        const v = { schema, name };
+        for (const style of [undefined, LOWER]) {
+          const fresh = () => readView(s, 'postgres', v, style);
+          const before = (await fresh())!;
+          const optsBefore = await reloptions(name);
+          const m = withCodeStyle(style, () => viewMigration('postgres', viewDdlText(before), v));
+          assert.ok(!('error' in m), `${name}: ${'error' in m ? m.error : ''}`);
+          for (const sql of m.statements) await queryAll(s, sql);
+          const after = (await fresh())!;
+          assert.ok(sameSource(before, after, 'postgres'), `${name} ${style ? 'needed' : 'always'}: ${viewDdlText(before)} → ${viewDdlText(after)}`);
+          assert.deepEqual(await reloptions(name), optsBefore, name);
+          assert.equal(optsBefore.length, on.length, name);
+        }
+        assert.match((await readView(s, 'postgres', v))!.definition, /'a;b'::text AS s/);
+      }
+      // 같은 뷰가 하나 더 생기지 않았다(대소문자 · 특수 문자 이름을 바르게 인용했다)
+      assert.deepEqual(
+        (await queryAll(s, 'SELECT table_name FROM information_schema.views WHERE table_schema = $1', [schema])).map((r) => String(r[0])).sort(),
+        [...names].sort(),
+      );
+    } finally {
+      await queryAll(s, `DROP SCHEMA ${q(schema)} CASCADE`);
     }
   });
 
@@ -400,20 +464,89 @@ describe('MySQL (real server)', { skip: !myAt && 'set BINDB_TEST_MYSQL=host:port
     await queryAll(s, 'CREATE TABLE vs_t (id int, name varchar(20))');
     await queryAll(s, 'CREATE SQL SECURITY INVOKER VIEW vs_v AS SELECT id FROM vs_t WHERE id > 0');
     const v = { schema: 'bindb_test', name: 'vs_v' };
-    const fresh = async () => {
-      const q = viewDefinitionQuery('mysql', v);
-      return definitionFromRow('mysql', (await runWith(s, q.sql, q.params))[0]);
-    };
+    const fresh = () => readView(s, 'mysql', v);
     const meta = await mysqlDriver.introspect(s, { ...cfg, introspectionLevel: 3, loadSources: 'all' });
     const cached = meta.find((t) => t.name === 'vs_v')?.definition;
     const now = await fresh();
-    assert.ok(cached && now && sameDefinition(cached, now.definition));
+    assert.ok(cached && now && sameDefinition(cached, now.definition, 'mysql'));
     const m = viewMigration('mysql', 'CREATE SQL SECURITY INVOKER VIEW vs_v AS SELECT id, name FROM vs_t', v);
     assert.ok(!('error' in m));
     assert.deepEqual(m.statements, ['CREATE OR REPLACE SQL SECURITY INVOKER VIEW `bindb_test`.`vs_v` AS SELECT id, name FROM vs_t']);
     for (const sql of m.statements) await queryAll(s, sql);
     assert.match((await fresh())!.definition, /`name`/);
     assert.deepEqual(await queryAll(s, "SELECT security_type FROM information_schema.views WHERE table_schema = 'bindb_test' AND table_name = 'vs_v'"), [['INVOKER']]);
+  });
+
+  // 코드 리뷰에서 찾은 것: 본문만 다시 만들어 DEFINER · SQL SECURITY · ALGORITHM · CHECK OPTION이 바뀌었다
+  it('view DDL: Submit of the opened DDL keeps ALGORITHM, DEFINER, SQL SECURITY and CHECK OPTION', async () => {
+    await queryAll(s, 'CREATE TABLE vo_t (id int, name varchar(20))');
+    await queryAll(s, "CREATE USER IF NOT EXISTS 'vo_app'@'%'");
+    await queryAll(s, 'CREATE ALGORITHM=MERGE DEFINER=`vo_app`@`%` SQL SECURITY INVOKER VIEW vo_v AS SELECT id FROM vo_t WHERE id > 0 WITH CASCADED CHECK OPTION');
+    try {
+      const v = { schema: 'bindb_test', name: 'vo_v' };
+      const before = (await readView(s, 'mysql', v))!;
+      const m = viewMigration('mysql', viewDdlText(before).replace('> 0', '> 1'), v);
+      assert.ok(!('error' in m));
+      for (const sql of m.statements) await queryAll(s, sql);
+      assert.deepEqual(
+        await queryAll(s, "SELECT definer, security_type, check_option FROM information_schema.views WHERE table_schema = 'bindb_test' AND table_name = 'vo_v'"),
+        [['vo_app@%', 'INVOKER', 'CASCADED']],
+      );
+      const [[, create]] = await queryAll(s, 'SHOW CREATE VIEW vo_v');
+      assert.match(String(create), /ALGORITHM=MERGE/);
+      assert.match(String(create), /> 1/);
+    } finally {
+      await queryAll(s, "DROP USER IF EXISTS 'vo_app'@'%'");
+    }
+  });
+
+  it('view DDL round trip: each ALGORITHM, DEFINER form, SQL SECURITY, column lists, LOCAL / CASCADED CHECK OPTION, names needing backticks', async () => {
+    await queryAll(s, 'CREATE TABLE `rt t` (id int, `se``lect` varchar(20))');
+    const users = ["'rt.app'@'%'", "'rt_app'@'10.0.0.%'", "'rt_app'@'localhost'"];
+    for (const u of users) await queryAll(s, `CREATE USER IF NOT EXISTS ${u}`);
+    const attrs = async (name: string) => {
+      const [row] = await queryAll(s, 'SELECT definer, security_type, check_option FROM information_schema.views WHERE table_schema = ? AND table_name = ?', ['bindb_test', name]);
+      const [[, create]] = await queryAll(s, `SHOW CREATE VIEW \`${name.split('`').join('``')}\``);
+      return { row, algorithm: /ALGORITHM=(\w+)/.exec(String(create))?.[1], columns: (await queryAll(s, 'SELECT column_name FROM information_schema.columns WHERE table_schema = ? AND table_name = ? ORDER BY ordinal_position', ['bindb_test', name])).map((r) => r[0]) };
+    };
+    const cases: { name: string; algorithm: string; definer: string; security: string; columns: string; check: string }[] = [
+      { name: 'rt v1', algorithm: 'UNDEFINED', definer: 'CURRENT_USER', security: 'DEFINER', columns: '', check: '' },
+      { name: 'rt`v2', algorithm: 'MERGE', definer: "'rt.app'@'%'", security: 'INVOKER', columns: '(`a b`, `c`)', check: ' WITH LOCAL CHECK OPTION' },
+      { name: 'select', algorithm: 'TEMPTABLE', definer: '`rt_app`@`10.0.0.%`', security: 'DEFINER', columns: '(x, y)', check: '' },
+      { name: 'Mixed.Case', algorithm: 'MERGE', definer: 'rt_app@localhost', security: 'INVOKER', columns: '', check: ' WITH CASCADED CHECK OPTION' },
+      { name: 'rt;v5', algorithm: 'UNDEFINED', definer: 'CURRENT_USER()', security: 'INVOKER', columns: '(p, q)', check: ' WITH CHECK OPTION' },
+    ];
+    try {
+      for (const c of cases) {
+        const ident = `\`${c.name.split('`').join('``')}\``;
+        await queryAll(
+          s,
+          `CREATE ALGORITHM=${c.algorithm} DEFINER=${c.definer} SQL SECURITY ${c.security} VIEW ${ident} ${c.columns} AS SELECT id, \`se\`\`lect\` FROM \`rt t\` WHERE id > 0 AND \`se\`\`lect\` <> 'a;b'${c.check}`,
+        );
+        // 탐색기는 서버가 알려 준 이름을 쓴다(lower_case_table_names = 1 · 2면 소문자로 저장된다)
+        const [[stored]] = await queryAll(s, 'SELECT table_name FROM information_schema.views WHERE table_schema = ? AND lower(table_name) = lower(?)', ['bindb_test', c.name]);
+        const v = { schema: 'bindb_test', name: String(stored) };
+        for (const style of [undefined, LOWER]) {
+          const fresh = () => readView(s, 'mysql', v, style);
+          const before = (await fresh())!;
+          const attrsBefore = await attrs(v.name);
+          const m = withCodeStyle(style, () => viewMigration('mysql', viewDdlText(before), v));
+          assert.ok(!('error' in m), `${c.name}: ${'error' in m ? m.error : ''}`);
+          for (const sql of m.statements) await queryAll(s, sql);
+          const after = (await fresh())!;
+          assert.ok(sameSource(before, after, 'mysql'), `${c.name}: ${viewDdlText(before)} → ${viewDdlText(after)}`);
+          assert.deepEqual(await attrs(v.name), attrsBefore, c.name);
+        }
+        const a = await attrs(v.name);
+        assert.equal(a.algorithm, c.algorithm, c.name);
+        assert.equal(a.row[1], c.security, c.name);
+        assert.equal(a.row[2], c.check.includes('LOCAL') ? 'LOCAL' : c.check ? 'CASCADED' : 'NONE', c.name);
+      }
+      assert.deepEqual((await attrs('rt`v2')).row[0], 'rt.app@%');
+      assert.deepEqual((await attrs('rt`v2')).columns, ['a b', 'c']);
+    } finally {
+      for (const u of users) await queryAll(s, `DROP USER IF EXISTS ${u}`);
+    }
   });
 
   it('plain statements are unchanged', async () => {

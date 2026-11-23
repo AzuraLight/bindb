@@ -7,7 +7,7 @@ import { after, describe, it } from 'node:test';
 import { queryAll } from '../src/drivers/cursor';
 import { sqliteDriver } from '../src/drivers/sqlite';
 import type { ConnectionConfig } from '../src/drivers/types';
-import { definitionFromRow, viewDdlText, viewDefinitionQuery, viewMigration } from '../src/core/viewSource';
+import { readViewSource, viewDdlText, viewMigration, viewSourceFromRows } from '../src/core/viewSource';
 
 const dir = mkdtempSync(path.join(tmpdir(), 'bindb-sqlite-'));
 after(() => rmSync(dir, { recursive: true, force: true }));
@@ -21,24 +21,34 @@ async function exec(file: string, sql: string) {
 }
 
 describe('sqlite view DDL', () => {
+  type SqliteSession = Awaited<ReturnType<typeof sqliteDriver.connect>>;
+  /** 이 세션에서 뷰 정의를 읽는다(편집기와 같은 조회) */
+  const readView = (s: SqliteSession, v: { schema: string; name: string }) => readViewSource('sqlite', v, (q) => queryAll(s, q.sql, q.params));
+  /** 마이그레이션을 한 트랜잭션으로 실행한다(UI와 같다): 실패하면 ROLLBACK하고 그 오류를 던진다 */
+  const submit = async (s: SqliteSession, statements: string[]) => {
+    await (await s.execute('BEGIN')).close();
+    try {
+      for (const sql of statements) await (await s.execute(sql)).close();
+      await (await s.execute('COMMIT')).close();
+    } catch (e) {
+      await (await s.execute('ROLLBACK')).close();
+      throw e;
+    }
+  };
+
   it('reads the view body and replaces the view with DROP + CREATE in one transaction', async () => {
     const file = path.join(dir, 'views.db');
     await exec(file, 'CREATE TABLE t (id INTEGER, name TEXT)');
     await exec(file, 'CREATE VIEW v AS SELECT id FROM t');
     const s = await sqliteDriver.connect(cfg(file), {});
     const v = { schema: 'main', name: 'v' };
-    const read = async () => {
-      const q = viewDefinitionQuery('sqlite', v);
-      const c = await s.execute(q.sql, q.params);
-      const { rows } = await c.fetch(10);
-      await c.close();
-      return definitionFromRow('sqlite', rows[0]);
-    };
-    assert.deepEqual(await read(), { definition: 'SELECT id FROM t', materialized: false });
-    const m = viewMigration('sqlite', viewDdlText('sqlite', v, 'SELECT id, name FROM t'), v);
+    const read = () => readView(s, v);
+    const body = async () => (await read())?.definition;
+    assert.equal(await body(), 'SELECT id FROM t');
+    const m = viewMigration('sqlite', viewDdlText({ ...(await read())!, definition: 'SELECT id, name FROM t' }), v);
     assert.ok(!('error' in m));
-    for (const sql of ['BEGIN', ...m.statements, 'COMMIT']) await (await s.execute(sql)).close();
-    assert.deepEqual(await read(), { definition: 'SELECT id, name FROM t', materialized: false });
+    await submit(s, m.statements);
+    assert.equal(await body(), 'SELECT id, name FROM t');
     // CREATE가 실패하면 DROP도 되돌린다(뷰가 사라지지 않는다)
     const bad = viewMigration('sqlite', 'CREATE VIEW v AS SELECT FROM WHERE', v);
     assert.ok(!('error' in bad));
@@ -46,7 +56,111 @@ describe('sqlite view DDL', () => {
     await (await s.execute(bad.statements[0])).close();
     await assert.rejects(s.execute(bad.statements[1]));
     await (await s.execute('ROLLBACK')).close();
-    assert.deepEqual(await read(), { definition: 'SELECT id, name FROM t', materialized: false });
+    assert.equal(await body(), 'SELECT id, name FROM t');
+    await s.close();
+  });
+
+  // 코드 리뷰에서 찾은 것: 열 목록이 사라지고, DROP VIEW가 INSTEAD OF 트리거를 지웠다
+  it('keeps the column list and the INSTEAD OF triggers; Force on a missing view creates it', async () => {
+    const file = path.join(dir, 'views2.db');
+    await exec(file, 'CREATE TABLE t (id INTEGER, name TEXT)');
+    await exec(file, 'CREATE VIEW v(a, b) AS SELECT id, name FROM t');
+    await exec(file, 'CREATE TRIGGER v_ins INSTEAD OF INSERT ON v BEGIN INSERT INTO t VALUES (new.a, new.b); END');
+    const s = await sqliteDriver.connect(cfg(file), {});
+    const v = { schema: 'main', name: 'v' };
+    const src = (await readView(s, v))!;
+    const edited = viewDdlText(src).replace('FROM t', 'FROM t WHERE id > 0');
+    const m = viewMigration('sqlite', edited, v, src.triggers);
+    assert.ok(!('error' in m));
+    await submit(s, m.statements);
+    assert.deepEqual(await queryAll(s, "SELECT name FROM pragma_table_info('v')"), [['a'], ['b']]);
+    assert.deepEqual(await queryAll(s, "SELECT name FROM sqlite_master WHERE type = 'trigger'"), [['v_ins']]);
+    await (await s.execute("INSERT INTO v VALUES (7, 'x')")).close();
+    assert.deepEqual(await queryAll(s, 'SELECT a, b FROM v'), [[7, 'x']]);
+    // 뷰가 없어진 뒤의 Force Refactoring: DROP VIEW IF EXISTS라 실패하지 않는다
+    await (await s.execute('DROP VIEW v')).close();
+    const force = viewMigration('sqlite', edited, v);
+    assert.ok(!('error' in force));
+    await submit(s, force.statements);
+    assert.ok(await readView(s, v));
+    await s.close();
+  });
+
+  it('several triggers (mixed-case view name, quoted trigger name) come back in order; triggers of other views are left alone', async () => {
+    const file = path.join(dir, 'views3.db');
+    await exec(file, 'CREATE TABLE t (id INTEGER, name TEXT, log TEXT)');
+    await exec(file, 'CREATE VIEW "MyView"(a, b) AS SELECT id, name FROM t');
+    await exec(file, 'CREATE VIEW other AS SELECT id FROM t');
+    await exec(file, 'CREATE TRIGGER ins INSTEAD OF INSERT ON myview BEGIN INSERT INTO t (id, name) VALUES (new.a, new.b); END');
+    await exec(file, 'CREATE TRIGGER "upd trigger" INSTEAD OF UPDATE OF b ON "MyView" BEGIN UPDATE t SET name = new.b WHERE id = old.a; END');
+    await exec(file, 'CREATE TRIGGER del INSTEAD OF DELETE ON MYVIEW BEGIN DELETE FROM t WHERE id = old.a; END');
+    await exec(file, 'CREATE TRIGGER other_ins INSTEAD OF INSERT ON other BEGIN SELECT 1; END');
+    const s = await sqliteDriver.connect(cfg(file), {});
+    const v = { schema: 'main', name: 'MyView' };
+    const src = (await readView(s, v))!;
+    assert.equal(src.triggers.length, 3);
+    const m = viewMigration('sqlite', viewDdlText(src).replace('FROM t', 'FROM t WHERE id > 0'), v, src.triggers);
+    assert.ok(!('error' in m));
+    await submit(s, m.statements);
+    assert.deepEqual(await queryAll(s, "SELECT name FROM sqlite_master WHERE type = 'trigger' ORDER BY name"), [['del'], ['ins'], ['other_ins'], ['upd trigger']]);
+    await (await s.execute("INSERT INTO \"MyView\" VALUES (1, 'x')")).close();
+    await (await s.execute("UPDATE \"MyView\" SET b = 'y' WHERE a = 1")).close();
+    assert.deepEqual(await queryAll(s, 'SELECT a, b FROM "MyView"'), [[1, 'y']]);
+    await (await s.execute('DELETE FROM "MyView"')).close();
+    assert.deepEqual(await queryAll(s, 'SELECT count(*) FROM t'), [[0]]);
+    await s.close();
+  });
+
+  // SQLite는 CREATE TRIGGER 때 new.열을 확인하지 않는다 — 지운 열을 쓰는 트리거도 다시 만들어지고, 쓸 때 실패한다
+  it('a trigger that uses a column the edit removes is recreated; it fails only when it fires', async () => {
+    const file = path.join(dir, 'views4.db');
+    await exec(file, 'CREATE TABLE t (id INTEGER, name TEXT)');
+    await exec(file, 'CREATE VIEW v(a, b) AS SELECT id, name FROM t');
+    await exec(file, 'CREATE TRIGGER v_ins INSTEAD OF INSERT ON v BEGIN INSERT INTO t VALUES (new.a, new.b); END');
+    const s = await sqliteDriver.connect(cfg(file), {});
+    const v = { schema: 'main', name: 'v' };
+    const src = (await readView(s, v))!;
+    const m = viewMigration('sqlite', 'CREATE VIEW v(a) AS SELECT id FROM t', v, src.triggers);
+    assert.ok(!('error' in m));
+    await submit(s, m.statements);
+    assert.deepEqual(await queryAll(s, "SELECT name FROM pragma_table_info('v')"), [['a']]);
+    assert.deepEqual(await queryAll(s, "SELECT name FROM sqlite_master WHERE type = 'trigger'"), [['v_ins']]);
+    await assert.rejects(s.execute('INSERT INTO v VALUES (1)'), /no such column: new\.b/);
+    await s.close();
+  });
+
+  it('when a trigger cannot be recreated the transaction rolls back and keeps the old view and triggers', async () => {
+    const file = path.join(dir, 'views5.db');
+    await exec(file, 'CREATE TABLE t (id INTEGER, name TEXT)');
+    await exec(file, 'CREATE VIEW v(a, b) AS SELECT id, name FROM t');
+    await exec(file, 'CREATE TRIGGER v_ins INSTEAD OF INSERT ON v BEGIN INSERT INTO t VALUES (new.a, new.b); END');
+    await exec(file, 'CREATE TRIGGER v_del INSTEAD OF DELETE ON v BEGIN DELETE FROM t WHERE id = old.a; END');
+    const s = await sqliteDriver.connect(cfg(file), {});
+    const v = { schema: 'main', name: 'v' };
+    const before = (await readView(s, v))!;
+    // 두 번째 트리거를 다시 만들 수 없다(그 사이 대상이 바뀐 경우를 흉내 낸다): 첫 트리거 · DROP · CREATE까지 모두 되돌려야 한다
+    const m = viewMigration('sqlite', viewDdlText(before).replace('FROM t', 'FROM t WHERE id > 0'), v, [before.triggers[0], 'CREATE TRIGGER v_bad INSTEAD OF INSERT ON gone BEGIN SELECT 1; END']);
+    assert.ok(!('error' in m));
+    await assert.rejects(submit(s, m.statements), /no such table/);
+    const after = (await readView(s, v))!;
+    assert.deepEqual([after.header, after.definition, after.triggers], [before.header, before.definition, before.triggers]);
+    assert.equal(before.triggers.length, 2);
+    await (await s.execute("INSERT INTO v VALUES (5, 'z')")).close();
+    assert.deepEqual(await queryAll(s, 'SELECT a, b FROM v'), [[5, 'z']]);
+    await s.close();
+  });
+
+  it('TEMP view text: SQLite stores CREATE TEMP VIEW without TEMP, and parseViewDdl keeps the column list', async () => {
+    const file = path.join(dir, 'views6.db');
+    await exec(file, 'CREATE TABLE t (id INTEGER, name TEXT)');
+    const s = await sqliteDriver.connect(cfg(file), {});
+    // 연결이 닫히면 TEMP 뷰는 사라지므로 이 세션에서 만든다
+    await (await s.execute('CREATE TEMP VIEW tv (x, "y z") AS SELECT id, name FROM t')).close();
+    const [[text]] = await queryAll(s, "SELECT sql FROM sqlite_temp_master WHERE name = 'tv'");
+    const src = viewSourceFromRows('sqlite', { schema: 'main', name: 'tv' }, [text]);
+    assert.deepEqual([src.header, src.definition], ['CREATE VIEW tv (x, "y z") AS', 'SELECT id, name FROM t']);
+    // 탐색기가 읽는 sqlite_master에는 TEMP 뷰가 없다(편집기도 main 뷰만 연다)
+    assert.equal(await readView(s, { schema: 'main', name: 'tv' }), undefined);
     await s.close();
   });
 });

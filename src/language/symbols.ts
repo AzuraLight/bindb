@@ -150,7 +150,7 @@ function statementSymbols(s: Statement, scope: SymbolScope, local: Map<string, s
   }
   for (const parts of ddlTargets(code)) tableOcc(parts, resolve(parts));
 
-  // 괄호 범위: 서브쿼리마다 별칭 · 테이블이 따로다. 각 토큰을 감싼 ( 위치들(바깥 → 안, 맨 앞 -1 = 문장 전체)
+  // 괄호 범위: 서브쿼리마다 별칭 · 테이블이 따로다
   const chains = parenChains(code);
   const scopeOf = (tok: Token) => innermostScope(chains, code, tok);
 

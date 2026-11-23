@@ -2,12 +2,17 @@ import * as vscode from 'vscode';
 import type { ConnectionStore } from '../core/connections';
 import { withCodeStyle } from '../core/ddl';
 import type { SessionManager } from '../core/sessions';
-import { definitionFromRow, sameDefinition, viewDdlText, viewDefinitionQuery, viewMigration, type ViewName } from '../core/viewSource';
-import type { ConnectionConfig, DriverId, MetaTable } from '../drivers/types';
+import { readViewSource, sameDefinition, sameSource, splitViewText, viewDdlText, viewMigration, type ViewName, type ViewSource } from '../core/viewSource';
+import type { CodeStyle, ConnectionConfig, DriverId, MetaTable } from '../drivers/types';
 import { errorText } from './explorer';
 
 /** 뷰 DDL 문서의 URI scheme */
 export const DDL_SCHEME = 'bindb-ddl';
+
+/** 이미 열려 있는 문서(없으면 undefined) */
+function openDocument(uri: vscode.Uri): vscode.TextDocument | undefined {
+  return vscode.workspace.textDocuments.find((d) => d.uri.toString() === uri.toString());
+}
 
 interface Entry {
   cfgId: string;
@@ -16,10 +21,11 @@ interface Entry {
   view: ViewName;
   driver: DriverId;
   /** 편집을 시작한 정의(이 값과 DB의 지금 정의가 다르면 Submit 때 충돌로 본다) */
-  base: string;
+  base: ViewSource;
+  /** base의 머리 · 꼬리를 만들 때 쓴 코드 스타일(Submit 때 같은 스타일로 다시 읽어 비교한다 — 스타일만 바뀐 것은 충돌이 아니다) */
+  style?: CodeStyle;
   /** 저장했지만 Submit하지 않은 DDL(DataGrip처럼 Submit 전까지 남는다) */
   local?: string;
-  materialized: boolean;
   mtime: number;
 }
 
@@ -51,6 +57,10 @@ export class ViewSourceEditor implements vscode.FileSystemProvider, vscode.Dispo
     ];
   }
 
+  /**
+   * 뷰 하나의 DDL 문서 URI. 편집기 상태는 path로 찾는다.
+   * @param side 'db'면 비교(Merge)에 쓰는 DB 쪽 읽기 전용 문서
+   */
   static uriOf(cfgId: string, database: string | undefined, view: ViewName, side?: 'db'): vscode.Uri {
     const seg = (s: string) => encodeURIComponent(s);
     return vscode.Uri.from({
@@ -62,44 +72,46 @@ export class ViewSourceEditor implements vscode.FileSystemProvider, vscode.Dispo
 
   // ── 탐색기: Go to DDL ──
 
+  /**
+   * 뷰의 DDL 편집기를 연다. 이미 열어 둔 편집(저장한 DDL)이 있으면 그것을 다시 보여 준다.
+   * @param database 연결의 기본이 아닌 데이터베이스
+   */
   async open(cfg: ConnectionConfig, table: MetaTable, database?: string): Promise<void> {
     if (table.kind !== 'view') throw new Error(`${table.schema}.${table.name} is a table; only view DDL can be edited.`);
     const view = { schema: table.schema, name: table.name };
     const uri = ViewSourceEditor.uriOf(cfg.id, database, view);
-    let fresh: { definition: string; materialized: boolean } | undefined;
-    let fetchError: unknown;
+    // 속성(머리 · 꼬리)은 늘 DB에서 읽는다 — 캐시한 본문만으로 열면 Submit이 속성을 지운다
+    let fresh: ViewSource | undefined;
     try {
       fresh = await this.fetch(cfg, view, database);
     } catch (e) {
-      fetchError = e;
+      throw new Error(`Could not read the definition of ${view.schema}.${view.name}: ${errorText(e)}`);
+    }
+    if (!fresh) {
+      throw new Error(`The definition of ${view.schema}.${view.name} is not available (PostgreSQL shows it only to the view's owner; MySQL needs SHOW VIEW).`);
     }
     let entry = this.entries.get(uri.path);
     if (!entry) {
-      // DataGrip처럼 캐시한 정의를 연다. 캐시가 없으면(Load sources 끔 · 2단계 · SQLite) DB에서 읽은 것을 연다
-      const base = table.definition ?? fresh?.definition;
-      if (base === undefined) {
-        throw new Error(
-          fetchError
-            ? `Could not read the definition of ${view.schema}.${view.name}: ${errorText(fetchError)}`
-            : `The definition of ${view.schema}.${view.name} is not available (PostgreSQL shows it only to the view's owner; MySQL needs SHOW VIEW).`,
-        );
-      }
-      entry = { cfgId: cfg.id, database, view, driver: cfg.driver, base, materialized: fresh?.materialized ?? false, mtime: Date.now() };
+      // DataGrip처럼 캐시한 본문(Load sources)을 연다. 캐시가 없으면(Load sources 끔 · 2단계 · SQLite) DB에서 읽은 것.
+      // 캐시가 CREATE 문 전체면(H2 1.x) 본문만 쓴다
+      const cached = table.definition === undefined ? undefined : (splitViewText(cfg.driver, table.definition)?.body ?? table.definition);
+      entry = { cfgId: cfg.id, database, view, driver: cfg.driver, base: fresh, mtime: 0 };
+      this.rebase(entry, { ...fresh, definition: cached ?? fresh.definition }, cfg.codeStyle);
       this.entries.set(uri.path, entry);
     }
     await vscode.window.showTextDocument(uri, { preview: false });
-    if (fresh && cfg.warnOutdatedDdl !== false && !sameDefinition(entry.base, fresh.definition)) {
-      void this.warnOutdated(cfg, uri, entry, fresh.definition);
+    if (cfg.warnOutdatedDdl !== false && !sameDefinition(entry.base.definition, fresh.definition, cfg.driver)) {
+      void this.warnOutdated(cfg, uri, entry, fresh);
     }
   }
 
-  private async warnOutdated(cfg: ConnectionConfig, uri: vscode.Uri, entry: Entry, fresh: string): Promise<void> {
+  private async warnOutdated(cfg: ConnectionConfig, uri: vscode.Uri, entry: Entry, fresh: ViewSource): Promise<void> {
     const pick = await vscode.window.showWarningMessage(
       `The cached DDL of ${entry.view.schema}.${entry.view.name} differs from the database.`,
       'Synchronize',
       'Disable check',
     );
-    if (pick === 'Synchronize') await this.synchronize(cfg, uri, entry, fresh);
+    if (pick === 'Synchronize') await this.synchronize(cfg, uri, entry, fresh, cfg.codeStyle);
     else if (pick === 'Disable check') {
       const current = this.store.get(cfg.id);
       if (!current) return;
@@ -109,14 +121,18 @@ export class ViewSourceEditor implements vscode.FileSystemProvider, vscode.Dispo
     }
   }
 
-  /** DB의 정의로 맞춘다. 저장한 편집이 있으면 되돌릴지 · 둘지 · 비교할지 묻는다 */
-  private async synchronize(cfg: ConnectionConfig, uri: vscode.Uri, entry: Entry, fresh: string): Promise<void> {
-    entry.base = fresh;
-    entry.mtime = Date.now();
+  /**
+   * DB의 정의로 맞춘다. 저장한 편집이 있으면 되돌릴지 · 둘지 · 비교할지 묻는다
+   * @param style fresh를 읽을 때 쓴 코드 스타일
+   */
+  private async synchronize(cfg: ConnectionConfig, uri: vscode.Uri, entry: Entry, fresh: ViewSource, style: CodeStyle | undefined): Promise<void> {
+    // 저장하지 않은 편집은 먼저 보관한다 — 정의를 바꾼 뒤에 저장하면 VS Code가 "파일이 더 새롭다" 충돌로 거부한다
+    const doc = openDocument(uri);
+    if (doc?.isDirty) await doc.save();
+    this.rebase(entry, fresh, style);
     // 탐색기 · 자동 완성의 캐시도 새로 읽는다
     void this.sessions.metadata(cfg, true, entry.database).catch(() => {});
-    const doc = vscode.workspace.textDocuments.find((d) => d.uri.toString() === uri.toString());
-    if (entry.local === undefined && !doc?.isDirty) {
+    if (entry.local === undefined) {
       this.changed(uri);
       return;
     }
@@ -127,7 +143,6 @@ export class ViewSourceEditor implements vscode.FileSystemProvider, vscode.Dispo
       'Merge',
     );
     if (pick === 'Revert local changes') {
-      if (doc?.isDirty) await doc.save();
       entry.local = undefined;
       entry.mtime = Date.now();
       this.changed(uri);
@@ -146,6 +161,10 @@ export class ViewSourceEditor implements vscode.FileSystemProvider, vscode.Dispo
 
   // ── 편집기 제목줄: Submit ──
 
+  /**
+   * 저장한 DDL을 DB에 마이그레이션으로 보낸다. 보내지 못한 이유는 메시지로 알린다.
+   * @param target 보낼 DDL 문서(없으면 활성 편집기)
+   */
   async submit(target?: vscode.Uri): Promise<void> {
     const uri = target ?? vscode.window.activeTextEditor?.document.uri;
     if (!uri || uri.scheme !== DDL_SCHEME || uri.query === 'db') {
@@ -158,32 +177,32 @@ export class ViewSourceEditor implements vscode.FileSystemProvider, vscode.Dispo
       vscode.window.showErrorMessage('This DDL editor is no longer attached to a data source. Open it again from the explorer.');
       return;
     }
-    const doc = vscode.workspace.textDocuments.find((d) => d.uri.toString() === uri.toString());
+    const doc = openDocument(uri);
     if (doc?.isDirty) await doc.save();
     if (entry.local === undefined) {
       vscode.window.showInformationMessage('No changes to submit.');
       return;
     }
     const name = `${entry.view.schema}.${entry.view.name}`;
-    if (entry.materialized) {
-      vscode.window.showErrorMessage(`Not submitted: ${name} is a materialized view. Changing one means dropping it, which loses its data and indexes.`);
-      return;
-    }
-    const migration = withCodeStyle(cfg.codeStyle, () => viewMigration(cfg.driver, entry.local!, entry.view));
-    if ('error' in migration) {
-      vscode.window.showErrorMessage(`Not submitted: ${migration.error}`);
-      return;
-    }
-
-    // 충돌 확인: 편집을 시작한 뒤 DB에서 바뀌었는가
-    let fresh: { definition: string } | undefined;
+    // 충돌 확인: 편집을 시작한 뒤 DB에서 바뀌었는가(속성까지 비교한다)
+    let fresh: ViewSource | undefined;
     try {
-      fresh = await this.fetch(cfg, entry.view, entry.database);
+      fresh = await this.fetch(cfg, entry.view, entry.database, entry.style);
     } catch (e) {
       vscode.window.showErrorMessage(`Not submitted: could not read the current definition of ${name}: ${errorText(e)}`);
       return;
     }
-    if (!fresh || !sameDefinition(fresh.definition, entry.base)) {
+    if (entry.base.materialized || fresh?.materialized) {
+      vscode.window.showErrorMessage(`Not submitted: ${name} is a materialized view. Changing one means dropping it, which loses its data and indexes.`);
+      return;
+    }
+    // SQLite: DROP VIEW가 지우는 트리거는 지금 DB에 있는 것으로 다시 만든다
+    const migration = withCodeStyle(cfg.codeStyle, () => viewMigration(cfg.driver, entry.local!, entry.view, fresh?.triggers ?? []));
+    if ('error' in migration) {
+      vscode.window.showErrorMessage(`Not submitted: ${migration.error}`);
+      return;
+    }
+    if (!fresh || !sameSource(fresh, entry.base, cfg.driver)) {
       const pick = await vscode.window.showWarningMessage(
         fresh ? `${name} was changed in the database after you started editing.` : `${name} no longer exists in the database, or its definition cannot be read.`,
         {
@@ -197,7 +216,7 @@ export class ViewSourceEditor implements vscode.FileSystemProvider, vscode.Dispo
       );
       if (!pick) return;
       if (pick !== 'Force Refactoring') {
-        await this.synchronize(cfg, uri, entry, fresh!.definition);
+        await this.synchronize(cfg, uri, entry, fresh!, entry.style);
         return;
       }
     }
@@ -222,24 +241,42 @@ export class ViewSourceEditor implements vscode.FileSystemProvider, vscode.Dispo
     }
     await this.sessions.metadata(cfg, true, entry.database).catch(() => {});
     const after = await this.fetch(cfg, entry.view, entry.database).catch(() => undefined);
-    entry.base = after?.definition ?? entry.base;
+    if (after) this.rebase(entry, after, cfg.codeStyle);
     entry.local = undefined;
     entry.mtime = Date.now();
     this.changed(uri);
+    // MySQL · H2는 DDL을 실행하면 열린 트랜잭션을 바로 커밋한다(되돌릴 수 없다)
+    const implicitCommit = cfg.driver === 'mysql' || cfg.driver === 'h2';
     vscode.window.showInformationMessage(
-      committed ? `Submitted ${name} to ${cfg.name}.` : `${name} was changed in the open transaction on ${cfg.name}; commit to keep it.`,
+      committed
+        ? `Submitted ${name} to ${cfg.name}.`
+        : implicitCommit
+          ? `Submitted ${name} to ${cfg.name}. ${cfg.driver === 'mysql' ? 'MySQL' : 'H2'} commits DDL at once, so the open transaction was committed too.`
+          : `${name} was changed in the open transaction on ${cfg.name}; commit to keep it.`,
     );
   }
 
-  private async fetch(cfg: ConnectionConfig, view: ViewName, database?: string): Promise<{ definition: string; materialized: boolean } | undefined> {
-    const q = viewDefinitionQuery(cfg.driver, view);
-    const rows = await this.sessions.introspectionQuery(cfg, q.sql, q.params, database);
-    return definitionFromRow(cfg.driver, rows[0]);
+  /**
+   * 편집을 시작한 정의를 바꾼다. 정의와 그 머리 · 꼬리를 만든 코드 스타일은 늘 함께 바꾼다
+   * (스타일을 빠뜨리면 Submit 때 스타일만 다른 것을 충돌로 본다).
+   */
+  private rebase(entry: Entry, base: ViewSource, style: CodeStyle | undefined): void {
+    entry.base = base;
+    entry.style = style;
+    entry.mtime = Date.now();
+  }
+
+  /**
+   * DB에서 뷰 정의를 읽는다. DataGrip처럼 구조 정보 읽기(introspection) 세션에서 읽는다 — 콘솔 세션에서 읽으면
+   * 그리드가 아직 다 받지 않은 결과 커서를 닫는다. 수동 트랜잭션에서 커밋하지 않은 변경은 세션이 따로면 보이지 않는다.
+   * @param style 머리 · 꼬리를 만들 코드 스타일(기본: 연결의 지금 스타일)
+   */
+  private fetch(cfg: ConnectionConfig, view: ViewName, database?: string, style: CodeStyle | undefined = cfg.codeStyle): Promise<ViewSource | undefined> {
+    return readViewSource(cfg.driver, view, (q) => this.sessions.introspectionQuery(cfg, q.sql, q.params, database), style);
   }
 
   private text(entry: Entry): string {
-    const cfg = this.store.get(entry.cfgId);
-    return withCodeStyle(cfg?.codeStyle, () => viewDdlText(entry.driver, entry.view, entry.base));
+    return viewDdlText(entry.base);
   }
 
   private changed(uri: vscode.Uri): void {
