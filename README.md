@@ -9,12 +9,17 @@ Schema-aware SQL editing and a fast result grid for **PostgreSQL**, **MySQL / Ma
 - **Database Explorer** — browse connections → schemas → tables and views → columns from the BindB activity bar. Click a table to open its data.
 - **Run the statement at the cursor** — press `Cmd+Enter` (macOS) / `Ctrl+Enter`, or click `▶ Run` above any statement. Select text to run exactly that.
 - **Fast result grid** — rows stream in page by page as you scroll, so large results open instantly. Copy cells with `Cmd/Ctrl+C`.
-- **Completion that knows your schema** — table names after `FROM` / `JOIN`, columns of the tables and aliases used in the statement, `schema.` and `alias.` lookups, and the column list of `INSERT INTO t (…)`.
-- **One connection per file** — a `-- @conn: <name>` comment at the top of a `.sql` file picks its connection. The status bar shows it; click to change.
-- **Data Sources panel** — add, edit and remove connections in one place: General / Options / SSL tabs, **Test Connection** with the server version, URL paste, SSL (`require` / `verify`) for PostgreSQL and MySQL, and a connect timeout.
+- **Completion that knows your schema** — table names after `FROM` / `JOIN`, columns of the tables and aliases used in the statement, `schema.` and `alias.` lookups, the column list of `INSERT INTO t (…)`, and `JOIN … ON` conditions from foreign keys (read from the database, or virtual ones you add).
+- **Code insight in SQL files** — warnings for tables and columns that are not in the loaded metadata (`bindb.diagnostics.unresolvedReferences`), hover with columns, keys and comments, **Go to Declaration**, **Find All References** and **Reveal in BindB Explorer**. Only metadata that is already loaded is used.
+- **One connection per file** — a `-- @conn: <name>` comment at the top of a `.sql` file picks its connection, and `-- @schema: <name>` its schema. The status bar shows the connection; click to change.
+- **Data Sources panel** modelled on DataGrip's Data Sources and Drivers dialog — General / Options / SSH/SSL / Schemas / Advanced tabs, **Test Connection** with the server version, URL paste, global and project data sources, data source templates and session templates.
+- **SSH tunnels and SSL** — password, key pair or agent authentication, `~/.ssh/config` and `known_hosts`; SSL modes Prefer / Require / Verify CA / Verify full with CA and client certificates.
+- **Introspection levels** like DataGrip's — chosen automatically by schema size, or set per data source and per schema.
 - **Result grid** — WHERE / ORDER BY bar, click-to-sort headers, export all rows to CSV / TSV / JSON / Markdown / SQL INSERT, Copy as, and editing table data with Preview / Submit / Revert.
+- **Transactions** — automatic or manual transaction control (Commit / Rollback), isolation level, and query cancel.
 - **Query History** — `Cmd/Ctrl+Alt+E` searches what you ran on each connection.
-- **Read-only connections** — mark a connection read-only and statements that change data are refused.
+- **DDL data sources** — a folder of `.sql` files mapped to a database: dump objects into files, update them, or apply the differences as a reviewed script.
+- **Read-only connections** — mark a connection read-only and statements that change data are refused before they run, and by the database where it supports it.
 
 ## Getting started
 
@@ -40,12 +45,22 @@ You need Java 11 or later (`JAVA_HOME` or `java` on `PATH`) and an `h2-*.jar` (D
 | `bindb.connections` | Connection definitions. Edited by **Add Connection**; passwords are not stored here. |
 | `bindb.h2.jarPath` | Path to the H2 driver `h2-*.jar`. |
 | `bindb.grid.pageSize` | Rows fetched per page in the result grid (default 500). |
+| `bindb.diagnostics.unresolvedReferences` | Warn about tables and columns that are not in the loaded metadata (default on). |
+| `bindb.ssh.configurations` | SSH configurations shared by data sources (user settings only). |
+| `bindb.dataSourceTemplates` | Data source templates, without credentials. |
+| `bindb.ai.mcpServer.enabled` / `bindb.ai.mcpServer.port` | Local MCP server for AI agents (off by default, port 47863). |
+| `bindb.ai.allowWrites` | Let AI tools change data, with a confirmation for each statement (user settings only). |
+
+## Requirements
+
+VS Code 1.103 or later (SQLite uses the `node:sqlite` module built into its Node.js). H2 also needs Java 11 or later.
 
 ## Known limitations
 
-- SQLite databases are loaded into memory and written back after each change. Avoid editing the same file from another program while BindB has it open.
 - An embedded H2 file is locked while BindB has it open. To use it from your app at the same time, add `AUTO_SERVER=TRUE` to both.
-- No SSH tunnels yet.
+- H2 array columns cannot be edited in the grid.
+- SSH hosts that need `ProxyJump` or `ProxyCommand` are not supported yet; BindB refuses them with a message instead of connecting directly.
+- There is no editor for object DDL yet.
 
 ## Privacy
 
