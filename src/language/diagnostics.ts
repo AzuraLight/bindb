@@ -1,5 +1,5 @@
 import type { DriverId, MetaTable } from '../drivers/types';
-import { createdName, cteDeclarations, tableReferences } from './references';
+import { createdName, cteDeclarations, innermostScope, parenChains, RESERVED, tableReferences } from './references';
 import type { Statement } from './splitter';
 import { findTable, same } from './meta';
 import { identName, isIdent, upperWord, type Token } from './tokenizer';
@@ -37,6 +37,34 @@ const BUILTIN_TABLES = new Set(['dual']);
 
 const upper = upperWord;
 
+/**
+ * 열 자리에 와도 열이 아닌 단어(키워드 · 인자 없는 함수 · 날짜 단위 · 숨은 열 등). 이 이름의 실제 열은 판정하지 않는다.
+ * 출처: PostgreSQL 키워드 표 · 시스템 열, MySQL 키워드 · INTERVAL 단위, SQLite rowid, H2 _ROWID_ · ROWNUM
+ */
+const NOT_COLUMN_WORDS = new Set(
+  `ALL AND ANY ARRAY AS ASC AT BETWEEN BINARY BOTH BY CASE CAST COLLATE CONFLICT CONSTRAINT CROSS CUBE CURRENT
+   CURRENT_CATALOG CURRENT_DATE CURRENT_ROLE CURRENT_SCHEMA CURRENT_TIME CURRENT_TIMESTAMP CURRENT_USER DEFAULT DESC
+   DISTINCT DIV DO DUAL DUPLICATE KEY ELSE END ESCAPE EXCEPT EXCLUDE EXISTS FALSE FETCH FILTER FIRST FOLLOWING FOR FROM FULL GLOB
+   GROUP GROUPING GROUPS HAVING ILIKE IN INNER INTERSECT INTERVAL INTO IS ISNULL JOIN LAST LATERAL LEADING LEFT LIKE
+   LIMIT LOCALTIME LOCALTIMESTAMP LOCK LOCKED MATCH MOD MODE NATURAL NEXT NO NOT NOTHING NOTNULL NOWAIT NULL NULLS OF
+   OFFSET ON ONLY OR ORDER ORDINALITY OTHERS OUTER OVER OVERLAPS PARTITION PRECEDING RANGE REGEXP RETURNING RIGHT RLIKE
+   ROLLUP ROW ROWS SELECT SEPARATOR SESSION_USER SET SETS SHARE SIMILAR SKIP SOME SOUNDS SYMMETRIC SYSDATE SYSTEM_USER
+   SYSTIMESTAMP THEN TIES TO TRAILING TRUE UNBOUNDED UNION UNKNOWN USER USING UTC_DATE UTC_TIME UTC_TIMESTAMP VALUES WHEN
+   WHERE WINDOW WITH WITHIN XOR ZONE
+   YEAR MONTH WEEK DAY HOUR MINUTE SECOND MICROSECOND MILLISECOND MICROSECONDS MILLISECONDS QUARTER EPOCH DOW DOY
+   ISODOW ISOYEAR CENTURY DECADE MILLENNIUM TIMEZONE TIMEZONE_HOUR TIMEZONE_MINUTE SECOND_MICROSECOND MINUTE_MICROSECOND
+   MINUTE_SECOND HOUR_MICROSECOND HOUR_SECOND HOUR_MINUTE DAY_MICROSECOND DAY_SECOND DAY_MINUTE DAY_HOUR YEAR_MONTH
+   ROWID OID _ROWID_ ROWNUM CTID XMIN XMAX CMIN CMAX TABLEOID`.split(/\s+/).filter(Boolean),
+);
+/** 이 단어 뒤에는 열이 올 수 있다(그 밖의 이름 뒤의 이름은 별칭이나 타입의 일부다: a b, double precision) */
+const BEFORE_COLUMN = new Set([
+  'SELECT', 'DISTINCT', 'ALL', 'WHERE', 'AND', 'OR', 'NOT', 'ON', 'BY', 'SET', 'WHEN', 'THEN', 'ELSE', 'CASE',
+  'HAVING', 'RETURNING', 'IN', 'LIKE', 'ILIKE', 'BETWEEN', 'ANY', 'SOME', 'RLIKE', 'REGEXP', 'GLOB', 'DIV', 'MOD',
+  'XOR', 'LIMIT', 'OFFSET', 'IS', 'EXISTS', 'TO', 'SIMILAR',
+]);
+/** 이 단어 바로 뒤의 이름은 열이 아니다(별칭 · 제약 이름 · 창 이름 · 콜레이션 · 잠글 테이블) */
+const NAME_AFTER = new Set(['AS', 'OF', 'CONSTRAINT', 'COLLATE', 'WINDOW', 'OVER', 'SEPARATOR', 'ESCAPE', 'INTERVAL']);
+
 interface Ref {
   schema?: string;
   name: string;
@@ -67,12 +95,16 @@ export function unresolvedReferences(statement: Statement, scope: ResolveScope):
   const first = code[0]?.text === '(' ? upper(code.find((t) => t.text !== '(')) : upper(code[0]);
   if (!first || !ANALYZED.has(first)) return [];
 
-  const ctes = new Set(cteDeclarations(code).map((t) => identName(t).toLowerCase()));
+  const cteToks = cteDeclarations(code);
+  const ctes = new Set(cteToks.map((t) => identName(t).toLowerCase()));
   const refs: Ref[] = [];
-  const refTokens = new Set<Token>();
-  for (const src of tableReferences(code, first)) {
+  const refTokens = new Set<Token>(cteToks);
+  /** 열을 알 수 없는 원본(서브쿼리 · 테이블 함수)이 있는 위치 */
+  const opaque: Token[] = [];
+  for (const src of tableReferences(code, first, (t) => opaque.push(t))) {
     const parts = src.parts;
     for (const p of parts) refTokens.add(p);
+    if (src.alias) refTokens.add(src.alias);
     const nameTok = parts[parts.length - 1];
     const ref: Ref = { name: identName(nameTok), alias: src.alias && identName(src.alias), nameTok };
     if (parts.length === 2) ref.schema = identName(parts[0]);
@@ -121,7 +153,7 @@ export function unresolvedReferences(statement: Statement, scope: ResolveScope):
     else add(r.name, r);
   }
   const missing = (rs: Ref[] | undefined, column: string) =>
-    !!rs?.length && rs.every((r) => r.table && r.table.columns.length > 0 && !r.table.columns.some((c) => same(c.name, column)));
+    !!rs?.length && rs.every((r) => r.table && !r.table.partial && r.table.columns.length > 0 && !r.table.columns.some((c) => same(c.name, column)));
   const columnProblem = (tok: Token, rs: Ref[]) =>
     problems.push({
       start: tok.start,
@@ -170,5 +202,66 @@ export function unresolvedReferences(statement: Statement, scope: ResolveScope):
     }
   }
 
-  return problems.sort((a, b) => a.start - b.start);
+  unqualifiedColumns(code, refs, refTokens, opaque, problems);
+  // 같은 자리를 두 검사(INSERT 열 목록 · SET 대상과 한정하지 않은 열)가 함께 잡을 수 있다
+  const seen = new Set<number>();
+  return problems.filter((p) => !seen.has(p.start) && seen.add(p.start)).sort((a, b) => a.start - b.start);
+}
+
+/**
+ * 한정하지 않은 열(SELECT nmae FROM users): 그 자리를 감싼 범위(서브쿼리)부터 바깥으로, 보이는 테이블 어디에도 없을 때만.
+ * 보이는 범위에 열을 모르는 원본(서브쿼리 · 테이블 함수 · WITH 이름 · 메타데이터에 없거나 열을 안 읽은 테이블)이 있으면 넘긴다.
+ */
+function unqualifiedColumns(code: Token[], refs: Ref[], refTokens: Set<Token>, opaque: Token[], problems: Problem[]): void {
+  if (!refs.length) return;
+  const chains = parenChains(code);
+  const scopeAt = (tok: Token) => innermostScope(chains, code, tok);
+  const byScope = new Map<number, Ref[]>();
+  for (const r of refs) {
+    const s = scopeAt(r.nameTok);
+    byScope.set(s, [...(byScope.get(s) ?? []), r]);
+  }
+  // 열을 모르는 원본: 놓인 범위와 그 괄호 위치(그 괄호 안의 토큰에게는 자기 자신이라 보이지 않는다)
+  const opaqueAt = opaque.map((t) => ({ scope: scopeAt(t), paren: code.indexOf(t) }));
+  // 열 대신 쓸 수 있는 이름: 별칭 · 테이블 이름(PostgreSQL 행 참조) · WITH 이름 · 출력 별칭(ORDER BY · GROUP BY에서)
+  const names = new Set<string>();
+  for (const r of refs) names.add((r.alias ?? r.name).toLowerCase()).add(r.name.toLowerCase());
+  for (let k = 1; k < code.length; k++) {
+    const t = code[k];
+    const prev = code[k - 1];
+    if (!isIdent(t) || refTokens.has(t)) continue;
+    if (NAME_AFTER.has(upper(prev) ?? '')) names.add(identName(t).toLowerCase());
+    // AS 없이 붙인 별칭: name n · count(*) c · 'x' label · 1 one
+    else if (
+      (prev?.text === ')' || prev?.type === 'string' || prev?.type === 'number' || (isIdent(prev) && !BEFORE_COLUMN.has(upper(prev) ?? ''))) &&
+      code[k + 1]?.text !== '(' && code[k + 1]?.text !== '.'
+    )
+      names.add(identName(t).toLowerCase());
+  }
+
+  for (let k = 0; k < code.length; k++) {
+    const t = code[k];
+    if (!isIdent(t) || t.open || refTokens.has(t)) continue;
+    const prev = code[k - 1];
+    const next = code[k + 1];
+    // a.b · f(…) · ::type · DATE '…' 같은 형식 리터럴
+    if (prev?.text === '.' || next?.text === '.' || next?.text === '(' || prev?.text === ':' || next?.type === 'string') continue;
+    const w = t.type === 'word' ? t.text.toUpperCase() : undefined;
+    if (w && (NOT_COLUMN_WORDS.has(w) || RESERVED.has(w) || w.startsWith('SQL_'))) continue;
+    if (isIdent(prev) && !BEFORE_COLUMN.has(upper(prev) ?? '')) continue;
+    const name = identName(t);
+    if (names.has(name.toLowerCase())) continue;
+
+    let found = false;
+    let unsure = false;
+    for (const scope of chains[k]) {
+      if (opaqueAt.some((o) => o.scope === scope && !chains[k].includes(o.paren))) unsure = true;
+      for (const r of byScope.get(scope) ?? []) {
+        if (r.unknown || !r.table || r.table.partial || r.table.columns.length === 0) unsure = true;
+        else if (r.table.columns.some((c) => same(c.name, name))) found = true;
+      }
+    }
+    if (found || unsure) continue;
+    problems.push({ start: t.start, end: t.end, code: 'unresolved-column', message: `Unable to resolve column '${name}'` });
+  }
 }

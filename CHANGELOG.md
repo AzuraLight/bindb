@@ -9,7 +9,12 @@
   qualified by a table or alias (`u.nmae`), in `INSERT` column lists and in single-table `UPDATE … SET`.
   Only already-loaded metadata is used (no connection is opened for this). Schemas that were not
   introspected, CTEs, objects created earlier in the same file, table functions and subqueries are not
-  judged. Unqualified columns are not checked yet. Setting: `bindb.diagnostics.unresolvedReferences`.
+  judged. Setting: `bindb.diagnostics.unresolvedReferences`.
+- **Unqualified columns are checked too** (`SELECT nmae FROM users`): a column is reported only when no table
+  visible from that place has it — the subquery's own tables and the outer ones. Nothing is judged when a
+  visible source has unknown columns (subquery, table function, `WITH` name, table not in the metadata).
+  Aliases, output aliases (also without `AS`), keywords, niladic functions such as `CURRENT_DATE`, date parts,
+  hidden columns (`rowid`, `ctid`, `_ROWID_` …) and type names are not taken as columns.
 - **Foreign keys are read from the database** (introspection level 2 and up) for PostgreSQL (`pg_catalog`,
   so tables you do not own are included), MySQL, SQLite (`REFERENCES t` without columns resolves to t's
   primary key) and H2 (information_schema, or `CROSS_REFERENCES` with JDBC metadata / H2 1.x).
@@ -29,6 +34,8 @@
 
 ### Changed
 
+- Columns of pre-introspected system catalogs (`pg_class` …) are no longer reported as unresolved: only
+  their common columns are listed.
 - Aliases are resolved per subquery: the same alias inside and outside a subquery no longer merges, and a
   correlated subquery still sees the outer alias.
 - Completion uses the `-- @schema` binding as its default schema, like hover, warnings and navigation.

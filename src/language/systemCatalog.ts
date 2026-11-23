@@ -10,6 +10,7 @@ const t = (schema: string, name: string, columns: string, kind: MetaTable['kind'
   schema,
   name,
   kind,
+  partial: true,
   columns: columns
     .split(',')
     .map((c) => c.trim())

@@ -51,7 +51,7 @@ export interface SourceRef {
  * FROM · JOIN · UPDATE · INSERT INTO · DELETE … USING 뒤의 테이블 이름들.
  * code는 주석을 뺀 토큰, first는 문장 첫 키워드(대문자).
  */
-export function tableReferences(code: Token[], first: string): SourceRef[] {
+export function tableReferences(code: Token[], first: string, onOpaque?: (tok: Token) => void): SourceRef[] {
   const refs: SourceRef[] = [];
   /** 함수 호출 괄호 깊이(EXTRACT(x FROM y) · SUBSTRING(… FROM …) 안의 FROM은 테이블 자리가 아니다) */
   const frames: ('call' | 'group')[] = [];
@@ -81,7 +81,10 @@ export function tableReferences(code: Token[], first: string): SourceRef[] {
       j += 2;
     }
     // generate_series(…) · unnest(…) 같은 테이블 함수: 테이블로 넣지 않고 괄호와 별칭을 건너뛴다
-    if (code[j]?.text === '(' && !columnList) return skipAlias(afterGroup(j));
+    if (code[j]?.text === '(' && !columnList) {
+      onOpaque?.(code[j]);
+      return skipAlias(afterGroup(j));
+    }
     if (upper(code[j]) === 'AS') j++;
     let alias: Token | undefined;
     if (isIdent(code[j]) && !NOT_ALIAS.has(upper(code[j]) ?? '')) {
@@ -118,7 +121,10 @@ export function tableReferences(code: Token[], first: string): SourceRef[] {
     /** 목록 항목 하나: 테이블 · 테이블 함수 · (SELECT …) s · LATERAL (…) x */
     const item = (n: number): number => {
       if (w !== 'INTO' && upper(code[n]) === 'LATERAL') n++;
-      if (w !== 'INTO' && code[n]?.text === '(') return skipAlias(afterGroup(n));
+      if (w !== 'INTO' && code[n]?.text === '(') {
+        onOpaque?.(code[n]);
+        return skipAlias(afterGroup(n));
+      }
       return readRef(n, w === 'INTO');
     };
     let j = item(k + 1);
@@ -130,6 +136,27 @@ export function tableReferences(code: Token[], first: string): SourceRef[] {
   }
   // 쉼표 목록을 먼저 읽어 순서가 섞일 수 있다 — 문서 순서로
   return refs.sort((a, b) => a.parts[0].start - b.parts[0].start);
+}
+
+/**
+ * 각 토큰을 감싼 ( 위치들(바깥 → 안). 맨 앞 -1은 문장 전체. 서브쿼리마다 별칭 · 테이블 범위를 나누는 데 쓴다.
+ * 토큰 자신이 ( 이면 그 괄호는 포함하지 않고, ) 이면 이미 닫힌 것으로 본다.
+ */
+export function parenChains(code: Token[]): number[][] {
+  const chains: number[][] = [];
+  const stack: number[] = [-1];
+  for (let k = 0; k < code.length; k++) {
+    if (code[k].text === ')' && stack.length > 1) stack.pop();
+    chains.push([...stack]);
+    if (code[k].text === '(') stack.push(k);
+  }
+  return chains;
+}
+
+/** 토큰을 바로 감싼 범위(가장 안쪽 ( 위치, 문장 전체면 -1). chains는 parenChains(code)의 결과 */
+export function innermostScope(chains: number[][], code: Token[], tok: Token): number {
+  const chain = chains[code.indexOf(tok)];
+  return chain[chain.length - 1];
 }
 
 /** WITH [RECURSIVE] a [(…)] AS [NOT] [MATERIALIZED] ( … ), b AS ( … ) 의 이름 토큰들 */

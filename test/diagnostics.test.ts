@@ -56,7 +56,7 @@ describe('unresolved tables', () => {
   it('ignores FROM/UPDATE/INTO that are not table positions', () => {
     assert.deepEqual(problems('SELECT EXTRACT(YEAR FROM created) FROM users'), []);
     assert.deepEqual(problems("SELECT substring(name FROM 2 FOR 3), trim(BOTH ' ' FROM name) FROM users"), []);
-    assert.deepEqual(problems('SELECT * FROM users WHERE a IS DISTINCT FROM b'), []);
+    assert.deepEqual(problems('SELECT * FROM users WHERE id IS DISTINCT FROM name'), []);
     assert.deepEqual(problems('SELECT * FROM users FOR UPDATE SKIP LOCKED'), []);
     assert.deepEqual(problems('INSERT INTO users (id) VALUES (1) ON DUPLICATE KEY UPDATE name = 1', 'mysql'), []);
     assert.deepEqual(problems('INSERT INTO users (id) VALUES (1) ON CONFLICT (id) DO UPDATE SET name = excluded.name'), []);
@@ -106,6 +106,79 @@ describe('unresolved columns', () => {
     assert.deepEqual(problems('WITH a AS (DELETE FROM nope RETURNING *) SELECT * FROM a'), ['nope']);
     assert.deepEqual(problems('SELECT * FROM users u WHERE u.id = ANY(SELECT o.bad FROM orders o)'), ['bad']);
     assert.deepEqual(problems('UPDATE users u JOIN orders o ON o.user_id = u.id SET total = 1', 'mysql'), []);
+  });
+});
+
+describe('unqualified columns', () => {
+  it('flags a column that no visible table has', () => {
+    assert.deepEqual(problems('SELECT nmae FROM users'), ['nmae']);
+    assert.deepEqual(problems('UPDATE users SET name = nmae WHERE id = 1'), ['nmae']);
+    assert.deepEqual(problems('DELETE FROM users WHERE nope = 1'), ['nope']);
+    assert.deepEqual(problems('SELECT `nmae` FROM `users`', 'mysql'), ['`nmae`']);
+    assert.deepEqual(problems('SELECT user_id FROM users WHERE EXISTS (SELECT 1 FROM orders WHERE user_id = users.id)'), ['user_id']);
+    assert.deepEqual(problems('SELECT id FROM users WHERE id IN (SELECT user_id FROM orders WHERE total > nope)'), ['nope']);
+  });
+
+  it('sees outer tables from a subquery and tables of every join', () => {
+    assert.deepEqual(problems('SELECT 1 FROM users WHERE EXISTS (SELECT 1 FROM orders WHERE user_id = id AND email IS NULL)'), []);
+    assert.deepEqual(problems("SELECT * FROM users t1 JOIN orders t2 ON t1.id = t2.user_id WHERE total > 0 AND name <> ''"), []);
+    assert.deepEqual(problems('UPDATE users SET name = 1 FROM orders WHERE user_id = users.id'), []);
+    assert.deepEqual(problems('DELETE FROM users USING orders WHERE user_id = users.id AND total = 0'), []);
+  });
+
+  it('does not judge when a visible source has unknown columns', () => {
+    assert.deepEqual(problems('SELECT x FROM (SELECT 1 AS x) s'), []);
+    assert.deepEqual(problems('SELECT x, name FROM users, generate_series(1, 3) x'), []);
+    assert.deepEqual(problems('WITH c AS (SELECT name FROM users) SELECT name, nope FROM c JOIN orders ON true'), []);
+    assert.deepEqual(problems('SELECT anything FROM lazy'), []);
+    assert.deepEqual(problems('SELECT anything FROM other.t'), []);
+    assert.deepEqual(problems('SELECT * FROM users u, LATERAL (SELECT nope FROM orders WHERE user_id = u.id) o'), ['nope']);
+  });
+
+  it('skips aliases, output aliases, keywords, niladic functions, date parts, hidden columns and types', () => {
+    for (const [sql, driver] of [
+      ['SELECT name AS n FROM users ORDER BY n', 'postgres'],
+      ['SELECT name n FROM users ORDER BY n', 'postgres'],
+      ['SELECT count(*) AS c FROM users GROUP BY name HAVING c > 1', 'mysql'],
+      ['SELECT CAST(id AS double precision), id::timestamp with time zone FROM users', 'postgres'],
+      ["SELECT DATE '2020-01-01', INTERVAL '1 day', TIMESTAMP '2020-01-01' FROM users", 'postgres'],
+      ['SELECT id + INTERVAL 1 DAY FROM users', 'mysql'],
+      ['SELECT EXTRACT(YEAR FROM id) FROM users', 'postgres'],
+      ['SELECT CURRENT_DATE, CURRENT_TIMESTAMP, CURRENT_USER, LOCALTIME FROM users', 'postgres'],
+      ['SELECT rowid, oid, _rowid_ FROM users', 'sqlite'],
+      ['SELECT ctid, xmin FROM users', 'postgres'],
+      ['SELECT row_number() OVER (PARTITION BY name ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) FROM users', 'postgres'],
+      ['SELECT sum(total) OVER w FROM orders WINDOW w AS (PARTITION BY user_id)', 'postgres'],
+      ['SELECT * FROM users ORDER BY name NULLS LAST FETCH FIRST 10 ROWS ONLY', 'postgres'],
+      ["SELECT * FROM users WHERE name COLLATE \"C\" = 'a' AND email LIKE 'a%' ESCAPE '!'", 'postgres'],
+      ['SELECT u FROM users u', 'postgres'],
+      ['SELECT name FROM users u JOIN orders o USING (id)', 'postgres'],
+      ['INSERT INTO users (id, name) VALUES (1, DEFAULT) ON CONFLICT (id) DO UPDATE SET name = excluded.name', 'postgres'],
+      ['INSERT INTO users (id) VALUES (1) ON CONFLICT ON CONSTRAINT users_pkey DO NOTHING', 'postgres'],
+      ['SELECT * FROM users FOR UPDATE OF users SKIP LOCKED', 'postgres'],
+      ['SELECT SQL_CALC_FOUND_ROWS name FROM users LOCK IN SHARE MODE', 'mysql'],
+      ['SELECT name FROM users WHERE id = :id OR id = ? OR id = $1', 'postgres'],
+      ['SELECT CASE WHEN id > 1 THEN name ELSE email END AS label FROM users', 'postgres'],
+      ['SELECT DISTINCT ON (name) name FROM users', 'postgres'],
+      ['SELECT true, false, null FROM users', 'postgres'],
+      ['SELECT name FROM users GROUP BY name WITH ROLLUP', 'mysql'],
+      ['SELECT array_agg(name ORDER BY id) FILTER (WHERE id > 0) FROM users', 'postgres'],
+      ["SELECT name FROM users WHERE id AT TIME ZONE 'UTC' > now()", 'postgres'],
+      ['SELECT nam', 'postgres'],
+      ['SELECT name FROM "unterminated', 'postgres'],
+    ] as const) assert.deepEqual(problems(sql, driver), [], sql);
+  });
+
+  it('does not judge columns of pre-introspected system catalogs (only common columns are listed)', async () => {
+    const { systemCatalog } = await import('../src/language/systemCatalog');
+    const tables = systemCatalog('postgres', []);
+    for (const sql of ['SELECT relhasindex FROM pg_class', 'SELECT c.relhasindex FROM pg_catalog.pg_class c']) {
+      assert.deepEqual(unresolvedReferences(splitStatements(sql, 'postgres')[0], { driver: 'postgres', tables, schema: 'public' }), [], sql);
+    }
+  });
+
+  it('reports a typo once even when the INSERT/SET check also sees it', () => {
+    assert.deepEqual(problems('UPDATE users SET nmae = 1'), ['nmae']);
   });
 });
 

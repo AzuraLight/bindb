@@ -1,5 +1,5 @@
 import type { MetaTable } from '../drivers/types';
-import { createdName, cteDeclarations, RESERVED, tableReferences } from './references';
+import { createdName, cteDeclarations, innermostScope, parenChains, RESERVED, tableReferences } from './references';
 import type { Statement } from './splitter';
 import { findTable, same } from './meta';
 import { identName, isIdent, upperWord, type Token } from './tokenizer';
@@ -151,19 +151,8 @@ function statementSymbols(s: Statement, scope: SymbolScope, local: Map<string, s
   for (const parts of ddlTargets(code)) tableOcc(parts, resolve(parts));
 
   // 괄호 범위: 서브쿼리마다 별칭 · 테이블이 따로다. 각 토큰을 감싼 ( 위치들(바깥 → 안, 맨 앞 -1 = 문장 전체)
-  const chains: number[][] = [];
-  {
-    const stack: number[] = [-1];
-    for (let k = 0; k < code.length; k++) {
-      if (code[k].text === ')' && stack.length > 1) stack.pop();
-      chains.push([...stack]);
-      if (code[k].text === '(') stack.push(k);
-    }
-  }
-  const scopeOf = (tok: Token) => {
-    const chain = chains[code.indexOf(tok)];
-    return chain[chain.length - 1];
-  };
+  const chains = parenChains(code);
+  const scopeOf = (tok: Token) => innermostScope(chains, code, tok);
 
   // FROM · JOIN … 의 테이블과 별칭(범위별)
   const aliases = new Map<string, { key: string; target: Target }>(); // `${범위}:${별칭}`

@@ -255,6 +255,8 @@ export interface MetaTable {
   foreignKeys?: ForeignKeyMeta[];
   /** 뷰 정의(Load sources for) */
   definition?: string;
+  /** 열 목록이 일부뿐이다(미리 만든 시스템 카탈로그는 자주 쓰는 열만 있다) — 없는 열이라고 판정하지 않는다 */
+  partial?: boolean;
   /** 이 객체를 읽은 수준(1 = 이름만이라 열 타입이 없다) */
   level?: 1 | 2 | 3;
 }
