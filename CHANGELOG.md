@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 — 2026-11-24
+
+Not published to marketplaces (BindB stays private until 1.0.0).
 
 ### Added
 
