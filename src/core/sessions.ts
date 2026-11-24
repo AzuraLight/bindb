@@ -4,6 +4,8 @@ import { readdir, readFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import { resolveSharedSsh, sshSecretOwner } from '../drivers/common';
 import { queryAll } from '../drivers/cursor';
+import { parseEnv } from '../drivers/h2';
+import { javaVersion } from '../drivers/jdbc/bridge';
 import { connectDriver } from '../drivers/tunnel';
 import type { SharedSshConfig } from '../drivers/types';
 import { withSessionTemplate } from './connectionDraft';
@@ -163,6 +165,8 @@ export class SessionManager implements vscode.Disposable {
     // Use session template: 템플릿 값(User · Read-only · Startup script)이 덮어쓴다
     const cfg = resolveSharedSsh(withSessionTemplate(original), sharedSshConfigs());
     await this.beforeConnection(cfg);
+    // Java가 없으면 비밀번호를 묻기 전에 알린다
+    if (cfg.driver === 'h2') await ensureJavaForH2(cfg.vmEnvironment);
     const password = await this.password(cfg);
     // 세션 템플릿의 Driver(드라이버 파일)가 있으면 그것을 쓴다
     const h2Jar = cfg.driverFile || vscode.workspace.getConfiguration('bindb').get<string>('h2.jarPath') || undefined;
@@ -628,4 +632,39 @@ export async function askHostKey(host: string, fp: string): Promise<boolean> {
     trust,
   );
   return ok === trust;
+}
+
+/** OpenJDK 내려받는 곳(Eclipse Temurin) */
+const OPENJDK_URL = 'https://adoptium.net/temurin/releases/';
+/** 이 창에서 Java 11+를 찾은 환경들(VM environment 글자). 찾은 환경은 다시 검사하지 않는다 */
+const javaFoundFor = new Set<string>();
+/** Java 안내가 떠 있는 동안은 새로 띄우지 않는다(실패한 접속을 다시 시도할 때마다 쌓이지 않게) */
+let javaNoticeOpen = false;
+
+/**
+ * H2는 JDBC 드라이버를 Java로 실행한다 — 접속 전에 Java 11 이상이 있는지 본다.
+ * 없거나 낮으면 OpenJDK를 내려받는 곳을 여는 버튼과 함께 알리고, 같은 내용의 오류로 끝낸다.
+ * @param vmEnvironment 데이터 소스의 VM environment(JVM을 띄울 때와 같은 환경에서 찾는다)
+ */
+export async function ensureJavaForH2(vmEnvironment = ''): Promise<void> {
+  if (javaFoundFor.has(vmEnvironment)) return;
+  const version = await javaVersion(undefined, parseEnv(vmEnvironment));
+  if (version !== undefined && version >= 11) {
+    javaFoundFor.add(vmEnvironment);
+    return;
+  }
+  const found = version === undefined ? 'Java was not found' : `Java ${version} was found`;
+  const message = `${found}. H2 needs Java 11 or later: install OpenJDK (for example Eclipse Temurin), set JAVA_HOME or put java on PATH, then connect again.`;
+  if (!javaNoticeOpen) {
+    javaNoticeOpen = true;
+    const download = 'Download OpenJDK';
+    void Promise.resolve(vscode.window.showWarningMessage(message, download)).then(
+      (pick) => {
+        javaNoticeOpen = false;
+        if (pick === download) void vscode.env.openExternal(vscode.Uri.parse(OPENJDK_URL));
+      },
+      () => (javaNoticeOpen = false),
+    );
+  }
+  throw new Error(message);
 }

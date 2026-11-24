@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from 'node:child_process';
+import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import * as path from 'node:path';
 import { createInterface } from 'node:readline';
@@ -51,6 +51,24 @@ export function javaExecutable(java?: string): string {
   const home = process.env.JAVA_HOME;
   const fromHome = home && path.join(home, 'bin', process.platform === 'win32' ? 'java.exe' : 'java');
   return fromHome && existsSync(fromHome) ? fromHome : 'java';
+}
+
+/**
+ * java -version의 주 버전(1.8 → 8, 11.0.2 → 11, 21 → 21).
+ * 실행할 수 없거나 버전을 읽지 못하면 undefined — macOS의 /usr/bin/java는 런타임이 없으면 실패로 끝난다.
+ * @param java java 실행 파일(없으면 javaExecutable의 규칙)
+ * @param env JVM에 더하는 환경 변수(데이터 소스의 VM environment) — JVM을 띄울 때와 같은 환경에서 찾는다
+ */
+export function javaVersion(java?: string, env: Record<string, string> = {}): Promise<number | undefined> {
+  return new Promise((resolve) => {
+    execFile(javaExecutable(java), ['-version'], { timeout: 15_000, windowsHide: true, env: { ...process.env, ...env } }, (err, stdout, stderr) => {
+      if (err) return resolve(undefined);
+      const m = /version "(\d+)(?:\.(\d+))?/.exec(`${stderr}\n${stdout}`);
+      if (!m) return resolve(undefined);
+      const major = Number(m[1]);
+      resolve(major === 1 && m[2] !== undefined ? Number(m[2]) : major);
+    });
+  });
 }
 
 type Reply = Record<string, unknown> & { ok: boolean; error?: string };

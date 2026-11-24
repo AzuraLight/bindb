@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import * as vscode from 'vscode';
 import { buildConfig, formFromConfig, type ConnectionForm, type FormErrors } from '../core/connectionDraft';
 import type { ConnectionStore } from '../core/connections';
-import { askHostKey, askKeyboard, setupStatements, sharedSshConfigs } from '../core/sessions';
+import { askHostKey, askKeyboard, ensureJavaForH2, setupStatements, sharedSshConfigs } from '../core/sessions';
 import { resolveSharedSsh } from '../drivers/common';
 import type { SharedSshConfig } from '../drivers/types';
 import { downloadH2, h2Versions } from '../drivers/h2Download';
@@ -216,6 +216,14 @@ export class ConnectionPanel {
     if (form.driver === 'h2' && !h2Jar.trim()) {
       report('Choose the h2-*.jar driver file to connect to H2.');
       return undefined;
+    }
+    if (form.driver === 'h2') {
+      try {
+        await ensureJavaForH2(built.config.vmEnvironment);
+      } catch (e) {
+        report(errorText(e));
+        return undefined;
+      }
     }
     const started = Date.now();
     let cfg: ConnectionConfig = { id: `trial-${key}`, ...built.config };
