@@ -83,7 +83,7 @@ export class ViewSourceEditor implements vscode.FileSystemProvider, vscode.Dispo
     // 속성(머리 · 꼬리)은 늘 DB에서 읽는다 — 캐시한 본문만으로 열면 Submit이 속성을 지운다
     let fresh: ViewSource | undefined;
     try {
-      fresh = await this.fetch(cfg, view, database);
+      fresh = await this.fetch(cfg, view, database, cfg.codeStyle);
     } catch (e) {
       throw new Error(`Could not read the definition of ${view.schema}.${view.name}: ${errorText(e)}`);
     }
@@ -240,7 +240,7 @@ export class ViewSourceEditor implements vscode.FileSystemProvider, vscode.Dispo
       return;
     }
     await this.sessions.metadata(cfg, true, entry.database).catch(() => {});
-    const after = await this.fetch(cfg, entry.view, entry.database).catch(() => undefined);
+    const after = await this.fetch(cfg, entry.view, entry.database, cfg.codeStyle).catch(() => undefined);
     if (after) this.rebase(entry, after, cfg.codeStyle);
     entry.local = undefined;
     entry.mtime = Date.now();
@@ -269,9 +269,10 @@ export class ViewSourceEditor implements vscode.FileSystemProvider, vscode.Dispo
   /**
    * DB에서 뷰 정의를 읽는다. DataGrip처럼 구조 정보 읽기(introspection) 세션에서 읽는다 — 콘솔 세션에서 읽으면
    * 그리드가 아직 다 받지 않은 결과 커서를 닫는다. 수동 트랜잭션에서 커밋하지 않은 변경은 세션이 따로면 보이지 않는다.
-   * @param style 머리 · 꼬리를 만들 코드 스타일(기본: 연결의 지금 스타일)
+   * @param style 머리 · 꼬리를 만들 코드 스타일. undefined는 기본 스타일이다 — 기본값을 두지 않는다
+   *   (편집을 기본 스타일로 시작했으면 entry.style이 undefined라, 기본값이 있으면 지금 스타일로 바뀌어 버린다)
    */
-  private fetch(cfg: ConnectionConfig, view: ViewName, database?: string, style: CodeStyle | undefined = cfg.codeStyle): Promise<ViewSource | undefined> {
+  private fetch(cfg: ConnectionConfig, view: ViewName, database: string | undefined, style: CodeStyle | undefined): Promise<ViewSource | undefined> {
     return readViewSource(cfg.driver, view, (q) => this.sessions.introspectionQuery(cfg, q.sql, q.params, database), style);
   }
 
